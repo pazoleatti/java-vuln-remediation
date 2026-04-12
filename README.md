@@ -1,59 +1,59 @@
 # java-vuln-remediation
 
-[MCP](https://modelcontextprotocol.io/)‑сервер для работы с **Java‑зависимостями**: поиск версий с известными уязвимостями (через [OSV](https://osv.dev/)), предложение **более новых версий** без записей OSV для координат с [Maven Central](https://repo1.maven.org/maven2/), краткие **пояснения**, какие advisories перестают применяться после обновления.
+An [MCP](https://modelcontextprotocol.io/) server for working with **Java dependencies**: find versions with known vulnerabilities (via [OSV](https://osv.dev/)), suggest **newer versions** with no OSV records for coordinates from [Maven Central](https://repo1.maven.org/maven2/), and short **notes** on which advisories no longer apply after an upgrade.
 
-Репозиторий: [https://github.com/Neovaryag/java-vuln-remediation](https://github.com/Neovaryag/java-vuln-remediation)
-
----
-
-## Содержание
-
-- [Возможности](#возможности)
-- [Как это работает](#как-это-работает)
-- [Требования](#требования)
-- [Установка и сборка](#установка-и-сборка)
-- [Подключение к Cursor / VS Code](#подключение-к-cursor--vs-code)
-- [Инструменты MCP](#инструменты-mcp)
-- [Ограничения и дисклеймер](#ограничения-и-дисклеймер)
-- [Разработка](#разработка)
-- [Лицензия](#лицензия)
+Repository: [https://github.com/Neovaryag/java-vuln-remediation](https://github.com/Neovaryag/java-vuln-remediation)
 
 ---
 
-## Возможности
+## Table of contents
 
-| Возможность | Описание |
-|-------------|----------|
-| **Maven** | Обход рекурсивно всех `pom.xml` (кроме каталогов `target/`, `node_modules/`), чтение `<dependencies>`, подстановка `${properties}` в `groupId` / `artifactId` / `version`, пропуск `type=pom`. |
-| **Gradle** | Эвристика по `build.gradle` / `build.gradle.kts`: строки вида `implementation 'g:a:v'`, `api("g:a:v")` и аналоги для `compileOnly`, `runtimeOnly`, `annotationProcessor` и т.д. |
-| **Проверка уязвимостей** | Пакетные запросы к OSV API (`POST https://api.osv.dev/v1/querybatch`), экосистема `Maven`, имя пакета `groupId:artifactId`. |
-| **Ремедиация** | Список версий из `maven-metadata.xml` на Maven Central; перебор кандидатов от **новых стабильных** релизов (prerelease откладываются); первая версия без записей OSV предлагается как замена. |
-| **Комментарий к обновлению** | Список идентификаторов OSV (например `GHSA-…`, `CVE-…`), которые были у старой версии и **не** возвращаются для предложенной версии, плюс краткие `summary` из ответа OSV, если они есть. |
-
-Это **не** замена полноценному SCA в CI (Snyk, OWASP Dependency-Check, GitHub Dependabot и т.п.), а удобный слой для IDE и ассистента.
-
----
-
-## Как это работает
-
-1. **Сбор координат** — из объявленных в проекте зависимостей формируется список `groupId:artifactId:version`.
-2. **OSV** — для каждой координаты запрашивается, есть ли известные уязвимости для этой версии.
-3. **Кандидаты на обновление** — из `maven-metadata.xml` берётся упорядоченный список версий; отфильтровываются версии **новее** текущей (через индекс в metadata или через `semver.coerce`, если точной строки нет в списке).
-4. **Порядок перебора** — сначала **стабильные** релизы (определение prerelease через `semver.parse`, плюс `-SNAPSHOT`, `-M…`), затем alpha/beta/rc, чтобы не предлагать `3.0.0-beta3`, если подходит стабильная `2.25.x`.
-5. **Проверка кандидата** — для каждой выбранной версии снова запрос к OSV; первая версия с **пустым** списком уязвимостей становится рекомендацией.
-
-Внешние сервисы: **OSV** и **Maven Central** (HTTP); ключи API не нужны.
+- [Features](#features)
+- [How it works](#how-it-works)
+- [Requirements](#requirements)
+- [Install and build](#install-and-build)
+- [Connecting to Cursor / VS Code](#connecting-to-cursor--vs-code)
+- [MCP tools](#mcp-tools)
+- [Limitations and disclaimer](#limitations-and-disclaimer)
+- [Development](#development)
+- [License](#license)
 
 ---
 
-## Требования
+## Features
 
-- **Node.js 18+** (используется встроенный `fetch`).
-- Сеть для запросов к `api.osv.dev` и `repo1.maven.org`.
+| Feature | Description |
+|--------|-------------|
+| **Maven** | Recursively walks all `pom.xml` files (excluding `target/`, `node_modules/`), reads `<dependencies>`, resolves `${properties}` in `groupId` / `artifactId` / `version`, skips `type=pom`. |
+| **Gradle** | Heuristics for `build.gradle` / `build.gradle.kts`: lines like `implementation 'g:a:v'`, `api("g:a:v")`, and similar for `compileOnly`, `runtimeOnly`, `annotationProcessor`, etc. |
+| **Vulnerability checks** | Batch requests to the OSV API (`POST https://api.osv.dev/v1/querybatch`), ecosystem `Maven`, package name `groupId:artifactId`. |
+| **Remediation** | Version list from `maven-metadata.xml` on Maven Central; tries candidates from **newer stable** releases (prereleases deferred); the first version with no OSV records is suggested as the replacement. |
+| **Upgrade notes** | Lists OSV IDs (e.g. `GHSA-…`, `CVE-…`) that applied to the old version and are **not** returned for the suggested version, plus short `summary` strings from the OSV response when available. |
+
+This is **not** a full substitute for SCA in CI (Snyk, OWASP Dependency-Check, GitHub Dependabot, etc.); it is a convenient layer for the IDE and assistants.
 
 ---
 
-## Установка и сборка
+## How it works
+
+1. **Collect coordinates** — Build a list of `groupId:artifactId:version` from dependencies declared in the project.
+2. **OSV** — For each coordinate, check whether known vulnerabilities exist for that version.
+3. **Upgrade candidates** — Take the ordered version list from `maven-metadata.xml`; keep versions **newer** than the current one (via index in metadata or `semver.coerce` if the exact string is missing from the list).
+4. **Traversal order** — **Stable** releases first (prerelease detection via `semver.parse`, plus `-SNAPSHOT`, `-M…`), then alpha/beta/rc, so `3.0.0-beta3` is not suggested when stable `2.25.x` works.
+5. **Validate candidate** — For each chosen version, query OSV again; the first version with an **empty** vulnerability list becomes the recommendation.
+
+External services: **OSV** and **Maven Central** (HTTP); no API keys required.
+
+---
+
+## Requirements
+
+- **Node.js 18+** (uses built-in `fetch`).
+- Network access to `api.osv.dev` and `repo1.maven.org`.
+
+---
+
+## Install and build
 
 ```bash
 git clone https://github.com/Neovaryag/java-vuln-remediation.git
@@ -62,15 +62,15 @@ npm install
 npm run build
 ```
 
-Запуск сервера вручную (stdio, как ожидает MCP‑клиент):
+Run the server manually (stdio, as MCP clients expect):
 
 ```bash
 npm start
-# или
+# or
 node dist/index.js
 ```
 
-Глобально (после `npm link` в каталоге проекта или `npm install -g .`):
+Globally (after `npm link` in the project directory or `npm install -g .`):
 
 ```bash
 java-vuln-remediation
@@ -78,11 +78,11 @@ java-vuln-remediation
 
 ---
 
-## Подключение к Cursor / VS Code
+## Connecting to Cursor / VS Code
 
-В конфигурации MCP укажите команду и путь к собранному `dist/index.js`.
+In your MCP configuration, set the command and path to the built `dist/index.js`.
 
-**Пример (Windows, путь с пробелами):**
+**Example (Windows, path with spaces):**
 
 ```json
 {
@@ -97,7 +97,7 @@ java-vuln-remediation
 }
 ```
 
-**Пример (macOS / Linux):**
+**Example (macOS / Linux):**
 
 ```json
 {
@@ -110,69 +110,69 @@ java-vuln-remediation
 }
 ```
 
-После сохранения настроек перезапустите MCP или окно редактора. Убедитесь, что выполнен `npm run build` и существует файл `dist/index.js`.
+After saving settings, restart MCP or the editor window. Ensure `npm run build` has been run and `dist/index.js` exists.
 
 ---
 
-## Инструменты MCP
+## MCP tools
 
 ### `scan_java_project`
 
-Сканирует дерево проекта от указанного корня.
+Scans the project tree from the given root.
 
-| Параметр | Тип | Описание |
-|----------|-----|----------|
-| `projectPath` | `string` | Корень Java‑проекта (лучше **абсолютный** путь). |
-| `includeTestScope` | `boolean`, optional | Учитывать зависимости со `scope=test` (по умолчанию `false`). |
-| `includeOptional` | `boolean`, optional | Учитывать `optional=true` (по умолчанию `false`). |
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `projectPath` | `string` | Root of the Java project (prefer an **absolute** path). |
+| `includeTestScope` | `boolean`, optional | Include dependencies with `scope=test` (default `false`). |
+| `includeOptional` | `boolean`, optional | Include `optional=true` (default `false`). |
 
-**Ответ:** краткая сводка и **Markdown**‑таблица: зависимость, текущая версия, предлагаемая версия, файл‑источник; блоки с перечнем OSV‑идентификаторов и текстом «что снимается» при обновлении.
+**Response:** short summary and a **Markdown** table: dependency, current version, suggested version, source file; sections listing OSV IDs and text on what is cleared by the upgrade.
 
 ### `check_maven_dependency`
 
-Точечная проверка одной координаты Maven.
+Point check for a single Maven coordinate.
 
-| Параметр | Тип | Описание |
-|----------|-----|----------|
+| Parameter | Type | Description |
+|-----------|------|-------------|
 | `groupId` | `string` | Maven `groupId`. |
 | `artifactId` | `string` | Maven `artifactId`. |
-| `version` | `string` | Текущая версия. |
+| `version` | `string` | Current version. |
 
-**Ответ:** либо сообщение, что по OSV записей нет, либо список уязвимостей, предлагаемая версия (если найдена) и комментарий по разнице OSV.
-
----
-
-## Ограничения и дисклеймер
-
-1. **Транзитивные зависимости** полноценно не разрешаются: не вызываются `mvn dependency:list` и не запускается Gradle для полного графа. В отчёт попадают в основном **явно** указанные в `pom.xml` / Gradle‑файлах артефакты.
-2. **Gradle** — только распространённые объявления строкой; сложный Kotlin DSL, каталог версий, convention plugins и т.п. могут быть не видны.
-3. **OSV** не гарантирует полноту по сравнению с корпоративными базами или NVD; возможны ложные отрицания и задержки по сравнению с другими источниками.
-4. Текст «что изменилось» отражает **разницу по OSV / summary из OSV**, а не полный changelog библиотеки; для мажорных обновлений нужен ручной просмотр release notes и совместимости API.
-5. Приватные репозитории Maven (не Central) для списка версий **не** используются — если `maven-metadata.xml` на Central недоступен, подбор версии может не сработать.
+**Response:** either a message that OSV has no records, or a vulnerability list, suggested version (if found), and notes on the OSV delta.
 
 ---
 
-## Разработка
+## Limitations and disclaimer
+
+1. **Transitive dependencies** are not fully resolved: `mvn dependency:list` is not invoked and Gradle is not run for the full graph. The report mainly covers **explicitly** declared artifacts in `pom.xml` / Gradle files.
+2. **Gradle** — common string declarations only; complex Kotlin DSL, version catalogs, convention plugins, etc. may not be detected.
+3. **OSV** does not guarantee completeness versus enterprise databases or the NVD; false negatives and lag versus other sources are possible.
+4. “What changed” reflects the **OSV delta / OSV summaries**, not the library’s full changelog; for major upgrades, review release notes and API compatibility manually.
+5. Private Maven repositories (not Central) are **not** used for version lists — if `maven-metadata.xml` on Central is unavailable, version selection may fail.
+
+---
+
+## Development
 
 ```bash
 npm install
 npm run build
 ```
 
-Исходники в каталоге `src/`:
+Sources in `src/`:
 
-| Файл | Назначение |
-|------|------------|
-| `index.ts` | Регистрация MCP‑инструментов, stdio‑транспорт. |
-| `scan.ts` | Сбор координат Maven/Gradle и оркестрация сканирования. |
-| `pom.ts` | Парсинг `pom.xml`. |
-| `gradle.ts` | Эвристика для Gradle. |
-| `osv.ts` | Клиент OSV `querybatch`. |
-| `mavenMeta.ts` | Загрузка `maven-metadata.xml`, сравнение версий. |
-| `remediate.ts` | Подбор версии без записей OSV, комментарии. |
+| File | Role |
+|------|------|
+| `index.ts` | MCP tool registration, stdio transport. |
+| `scan.ts` | Maven/Gradle coordinate collection and scan orchestration. |
+| `pom.ts` | `pom.xml` parsing. |
+| `gradle.ts` | Gradle heuristics. |
+| `osv.ts` | OSV `querybatch` client. |
+| `mavenMeta.ts` | Load `maven-metadata.xml`, compare versions. |
+| `remediate.ts` | Pick a version with no OSV records, comments. |
 
 ---
 
-## Лицензия
+## License
 
-MIT — см. файл [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).
