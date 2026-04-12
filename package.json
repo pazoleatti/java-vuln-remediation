@@ -1,0 +1,45 @@
+{
+  "name": "java-vuln-remediation",
+  "version": "1.0.0",
+  "description": "MCP-сервер: OSV + Maven Central для поиска уязвимых Java-зависимостей и предложения обновлений",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Neovaryag/java-vuln-remediation.git"
+  },
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "bin": {
+    "java-vuln-remediation": "dist/index.js"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "java",
+    "maven",
+    "gradle",
+    "osv",
+    "vulnerability",
+    "dependencies",
+    "security"
+  ],
+  "author": "",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "fast-xml-parser": "^5.5.11",
+    "semver": "^7.7.4",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "@types/semver": "^7.7.1",
+    "typescript": "^6.0.0"
+  }
+}
