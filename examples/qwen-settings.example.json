@@ -1,0 +1,29 @@
+{
+  "_comment": "Copy the mcpServers block into ~/.qwen/settings.json (user scope) or <project>/.qwen/settings.json (project scope). Replace absolute paths with your machine's. Do NOT commit this file with real values to a public repo.",
+
+  "mcpServers": {
+    "java-vuln-remediation": {
+      "command": "node",
+      "args": [
+        "C:/Users/diomi/IdeaProjects/java-vuln-remediation/dist/servers/osv/index.js"
+      ],
+      "timeout": 60000,
+      "trust": false
+    },
+
+    "sast-remediation": {
+      "command": "node",
+      "args": [
+        "C:/Users/diomi/IdeaProjects/java-vuln-remediation/dist/servers/sast/index.js"
+      ],
+      "env": {
+        "SAST_API_BASE_URL": "https://sast.corp.example/api/v1",
+        "SAST_JWT_FILE": "C:/Users/diomi/.config/sast-mcp/token",
+        "SAST_CACHE_DIR": "C:/Users/diomi/.cache/sast-mcp"
+      },
+      "timeout": 120000,
+      "trust": false,
+      "includeTools": ["request_report", "get_report", "get_vulnerability"]
+    }
+  }
+}
