@@ -5,6 +5,8 @@ dist/
 Thumbs.db
 .env
 .env.*
+*.token
+secrets/
 .idea/
 .vscode/
 *.tsbuildinfo

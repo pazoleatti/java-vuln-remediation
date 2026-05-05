@@ -6,13 +6,16 @@
     "type": "git",
     "url": "https://github.com/Neovaryag/java-vuln-remediation.git"
   },
-  "main": "dist/index.js",
+  "main": "dist/servers/osv/index.js",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/index.js"
+    "start": "node dist/servers/osv/index.js",
+    "start:osv": "node dist/servers/osv/index.js",
+    "start:sast": "node dist/servers/sast/index.js"
   },
   "bin": {
-    "java-vuln-remediation": "dist/index.js"
+    "java-vuln-remediation": "dist/servers/osv/index.js",
+    "sast-remediation-mcp": "dist/servers/sast/index.js"
   },
   "keywords": [
     "mcp",

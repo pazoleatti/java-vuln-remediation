@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p src/servers/osv src/servers/sast src/shared)",
+      "Bash(git mv *)",
+      "Bash(npm run *)",
+      "Bash(npm install *)",
+      "mcp__context7__resolve-library-id",
+      "mcp__context7__query-docs"
+    ]
+  }
+}
