@@ -1,0 +1,170 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": [
+    "taskUuid",
+    "practice",
+    "ci",
+    "createdAt",
+    "finishedAt",
+    "scanObjectInfo",
+    "vulnerabilityCounts",
+    "vulnerabilitiesInfo",
+    "resultInfo"
+  ],
+  "properties": {
+    "taskUuid": {
+      "type": "string",
+      "description": "UUID задания сканирования"
+    },
+    "practice": {
+      "type": "string",
+      "enum": ["SAST"],
+      "description": "Практика безопасности"
+    },
+    "ci": {
+      "type": "string",
+      "description": "Номер CI-патча"
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Время создания задания"
+    },
+    "finishedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Время завершения сканирования"
+    },
+    "scanObjectInfo": {
+      "type": "object",
+      "required": ["type", "hash"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["COMMIT"],
+          "description": "Тип объекта сканирования"
+        },
+        "hash": {
+          "type": "string",
+          "description": "Хеш коммита"
+        },
+        "repoUrl": {
+          "type": "string",
+          "format": "uri",
+          "description": "URL репозитория"
+        }
+      }
+    },
+    "vulnerabilityCounts": {
+      "type": "object",
+      "properties": {
+        "critical": { "type": "integer", "minimum": 0 },
+        "high":     { "type": "integer", "minimum": 0 },
+        "medium":   { "type": "integer", "minimum": 0 },
+        "low":      { "type": "integer", "minimum": 0 },
+        "info":     { "type": "integer", "minimum": 0 }
+      }
+    },
+    "vulnerabilitiesInfo": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "description", "fixGuide", "severity"],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Код уязвимости"
+          },
+          "description": {
+            "type": "string",
+            "description": "Описание уязвимости"
+          },
+          "fixGuide": {
+            "type": "string",
+            "description": "Руководство по исправлению"
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"],
+            "description": "Критичность"
+          },
+          "cwe": {
+            "type": ["string", "null"],
+            "description": "CWE ID (например, CWE-79)"
+          }
+        }
+      }
+    },
+    "resultInfo": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["artifactName", "vulnerabilities"],
+        "properties": {
+          "artifactName": {
+            "type": "string",
+            "description": "Путь к артефакту"
+          },
+          "vulnerabilities": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["code", "vulnerabilityHash", "location"],
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "description": "Код уязвимости"
+                },
+                "vulnerabilityHash": {
+                  "type": "string",
+                  "description": "Хеш уязвимости"
+                },
+                "location": {
+                  "type": "object",
+                  "required": ["line", "text", "target"],
+                  "properties": {
+                    "line":   { "type": "string", "description": "Номер строки" },
+                    "text":   { "type": "string", "description": "Код строки" },
+                    "target": { "type": "string", "description": "Целевой метод/функция" }
+                  }
+                },
+                "decision": {
+                  "type": ["object", "null"],
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "enum": ["notexploit"],
+                      "description": "Тип решения"
+                    },
+                    "comment": {
+                      "type": "string",
+                      "description": "Комментарий к решению"
+                    },
+                    "author": {
+                      "type": "string",
+                      "description": "Автор решения"
+                    },
+                    "createDate": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  }
+                },
+                "dates": {
+                  "type": "object",
+                  "required": ["createDate", "confirmDate", "expirationDate"],
+                  "properties": {
+                    "createDate":     { "type": "string", "format": "date-time" },
+                    "confirmDate":    { "type": "string", "format": "date-time" },
+                    "expirationDate": { "type": "string", "format": "date-time" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

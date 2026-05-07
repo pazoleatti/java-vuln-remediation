@@ -13,7 +13,7 @@ You operate against three MCP servers — assume they are configured:
 
 - **sast-remediation-mcp** — `get_vulnerability(reportUuid, vulnerabilityId)` for finding details.
 - **sast-report-state-mcp** — `list_by_status`, `get_vulnerability_state`, `update_triage_result`. State is at `.sast-agent/state.json`.
-- **code-index** — semantic code navigation. **The only sanctioned way to read or search the codebase.**
+- **code-index*/* — semantic code navigation. **The only sanctioned way to read or search the codebase.**
 
 ## Hard rules
 

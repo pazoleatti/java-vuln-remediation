@@ -8,26 +8,85 @@ import { SastClient } from "./client.js";
 import { readCachedReport, writeCachedReport } from "./cache.js";
 import { redactErrorMessage } from "../../shared/redact.js";
 
+type CatalogEntry = {
+  code: string;
+  description?: string;
+  fixGuide?: string;
+  severity?: string;
+  cwe?: string | null;
+};
+
+type Occurrence = {
+  artifactName: string;
+  code: string;
+  vulnerabilityHash: string;
+  location?: unknown;
+  decision?: unknown;
+  dates?: unknown;
+};
+
+type VulnerabilityView = {
+  matchedBy: "code" | "vulnerabilityHash";
+  catalog: CatalogEntry | null;
+  occurrences: Occurrence[];
+};
+
 /**
- * BFS for an object with `id === vulnId` that looks like a vulnerability
- * (has at least one of: severity, cwe, locations, description). Schema-agnostic:
- * works regardless of how the corp report groups vulnerabilities by artifact.
+ * Typed lookup against the SAST report shape (see jschema/sast-report-schema.json).
+ * The identifier is either a vulnerability `code` (returns all occurrences of that
+ * type across artifacts) or a `vulnerabilityHash` (returns the single instance).
+ * Catalog metadata (description / fixGuide / severity / cwe) lives in
+ * `vulnerabilitiesInfo[]`; per-artifact instances live in `resultInfo[].vulnerabilities[]`.
  */
-function findVulnerability(report: unknown, vulnId: string): unknown | null {
-  const stack: unknown[] = [report];
-  while (stack.length) {
-    const node = stack.pop();
-    if (Array.isArray(node)) {
-      stack.push(...node);
-    } else if (node && typeof node === "object") {
-      const o = node as Record<string, unknown>;
-      const isVulnLike =
-        o.severity != null || o.cwe != null || o.locations != null || o.description != null;
-      if (isVulnLike && (o.id === vulnId || o.uuid === vulnId)) return o;
-      stack.push(...Object.values(o));
+function findVulnerability(report: unknown, identifier: string): VulnerabilityView | null {
+  if (!report || typeof report !== "object") return null;
+  const r = report as Record<string, unknown>;
+
+  const catalogList = Array.isArray(r.vulnerabilitiesInfo) ? r.vulnerabilitiesInfo : [];
+  const resultList = Array.isArray(r.resultInfo) ? r.resultInfo : [];
+
+  const occurrences: Occurrence[] = [];
+  let matchedBy: "code" | "vulnerabilityHash" | null = null;
+
+  for (const artifact of resultList) {
+    if (!artifact || typeof artifact !== "object") continue;
+    const a = artifact as Record<string, unknown>;
+    const artifactName = typeof a.artifactName === "string" ? a.artifactName : "";
+    const vulns = Array.isArray(a.vulnerabilities) ? a.vulnerabilities : [];
+    for (const v of vulns) {
+      if (!v || typeof v !== "object") continue;
+      const vo = v as Record<string, unknown>;
+      const code = typeof vo.code === "string" ? vo.code : "";
+      const hash = typeof vo.vulnerabilityHash === "string" ? vo.vulnerabilityHash : "";
+      if (hash === identifier) {
+        matchedBy = "vulnerabilityHash";
+        occurrences.push({ artifactName, code, vulnerabilityHash: hash, location: vo.location, decision: vo.decision, dates: vo.dates });
+      } else if (code === identifier) {
+        if (matchedBy == null) matchedBy = "code";
+        occurrences.push({ artifactName, code, vulnerabilityHash: hash, location: vo.location, decision: vo.decision, dates: vo.dates });
+      }
     }
   }
-  return null;
+
+  const catalogCode = matchedBy === "vulnerabilityHash" ? occurrences[0]?.code : identifier;
+  let catalog: CatalogEntry | null = null;
+  for (const c of catalogList) {
+    if (!c || typeof c !== "object") continue;
+    const co = c as Record<string, unknown>;
+    if (typeof co.code === "string" && co.code === catalogCode) {
+      catalog = {
+        code: co.code,
+        description: typeof co.description === "string" ? co.description : undefined,
+        fixGuide: typeof co.fixGuide === "string" ? co.fixGuide : undefined,
+        severity: typeof co.severity === "string" ? co.severity : undefined,
+        cwe: co.cwe === null || typeof co.cwe === "string" ? (co.cwe as string | null) : undefined,
+      };
+      break;
+    }
+  }
+
+  if (!catalog && occurrences.length === 0) return null;
+  return { matchedBy: matchedBy ?? "code", catalog, occurrences };
 }
 
 const baseUrl = process.env.SAST_API_BASE_URL?.trim();
@@ -52,7 +111,7 @@ mcpServer.registerTool(
   "request_report",
   {
     description:
-      "POST commit hash + Nexus distribution URL to the SAST API. Returns whatever the API responds with (typically includes reportUuid).",
+      "POST commit hash + Nexus distribution URL to the SAST API. Returns the API response JSON; the report identifier comes back in the `uuid` field (alongside `type`, `status`, `format`) — pass that value as `reportUuid` to get_report.",
     inputSchema: {
       commitHash: z.string().min(1).describe("Git commit hash the SAST scan should be associated with."),
       distributionUrl: z
@@ -81,7 +140,7 @@ mcpServer.registerTool(
   "get_report",
   {
     description:
-      "GET full SAST report by reportUuid. Caches the response on disk so subsequent get_vulnerability calls do not re-fetch.",
+      "GET full SAST report by reportUuid. Top-level fields: taskUuid, practice, ci, createdAt, finishedAt, scanObjectInfo, vulnerabilityCounts, vulnerabilitiesInfo (catalog of vulnerability types keyed by `code`), resultInfo (per-artifact findings keyed by `code` + `vulnerabilityHash`). Caches the response on disk so subsequent get_vulnerability calls do not re-fetch.",
     inputSchema: {
       reportUuid: z.string().min(1).describe("Report UUID returned by request_report."),
     },
@@ -107,13 +166,13 @@ mcpServer.registerTool(
   "get_vulnerability",
   {
     description:
-      "Return details of a single vulnerability (name, description, severity, CWE, guide, locations, resolution status) from a previously fetched report. Avoids loading the full report into agent context. Falls back to fetching the report if the cache is cold.",
+      "Return a single vulnerability from a previously fetched report. Joins the catalog entry from `vulnerabilitiesInfo` (description, fixGuide, severity, cwe) with all matching occurrences from `resultInfo[].vulnerabilities` (artifactName, location, decision, dates). The identifier may be either a vulnerability `code` (returns every occurrence of that type across artifacts) or a `vulnerabilityHash` (returns the single specific finding). Falls back to fetching the report if the cache is cold.",
     inputSchema: {
       reportUuid: z.string().min(1),
       vulnerabilityId: z
         .string()
         .min(1)
-        .describe("Identifier of the vulnerability inside the report (matches `id` or `uuid` of the finding)."),
+        .describe("Either a vulnerability `code` (catalog id from vulnerabilitiesInfo) or a `vulnerabilityHash` (per-finding id from resultInfo)."),
     },
   },
   async ({ reportUuid, vulnerabilityId }) => {
@@ -130,7 +189,7 @@ mcpServer.registerTool(
           content: [
             {
               type: "text" as const,
-              text: `Vulnerability \`${vulnerabilityId}\` not found in report \`${reportUuid}\`. Use get_report to inspect available ids.`,
+              text: `Vulnerability \`${vulnerabilityId}\` not found in report \`${reportUuid}\` (searched by code and vulnerabilityHash). Use get_report to inspect available identifiers.`,
             },
           ],
         };

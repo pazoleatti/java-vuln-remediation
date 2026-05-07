@@ -7,10 +7,12 @@ export type RequestReportInput = {
 };
 
 /**
- * Thin HTTP client for the corporate SAST API. Endpoint paths are placeholders
- * — adjust to the real contract:
- *   - POST {base}/reports        body: { commitHash, distributionUrl }  → { reportUuid, ... }
- *   - GET  {base}/reports/{uuid}                                        → full report JSON
+ * Thin HTTP client for the corporate SAST API (ASPAS). Contract:
+ *   - POST {base}/api/v1/report
+ *       body: { practice: "SAST", type: "EXTENDED", format: "JSON",
+ *               hash: <commitHash>, distributionUrl }
+ *       → { reportUuid, ... }
+ *   - GET  {base}/api/v1/report/{uuid}                                  → full report JSON
  *
  * The token is held inside the `getToken` closure passed in; this class never
  * stores it as a field, so JSON.stringify(client) cannot leak it.
@@ -24,11 +26,18 @@ export class SastClient {
   }
 
   requestReport(input: RequestReportInput): Promise<unknown> {
-    return this.fetchJson("POST", "/reports", input);
+    const body = {
+      practice: "SAST",
+      type: "EXTENDED",
+      format: "JSON",
+      hash: input.commitHash,
+      distributionUrl: input.distributionUrl,
+    };
+    return this.fetchJson("POST", "/api/v1/report", body);
   }
 
   getReport(reportUuid: string): Promise<unknown> {
-    return this.fetchJson("GET", `/reports/${encodeURIComponent(reportUuid)}`);
+    return this.fetchJson("GET", `/api/v1/report/${encodeURIComponent(reportUuid)}`);
   }
 
   private async fetchJson(
