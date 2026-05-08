@@ -12,12 +12,14 @@
     "start": "node dist/servers/osv/index.js",
     "start:osv": "node dist/servers/osv/index.js",
     "start:sast": "node dist/servers/sast/index.js",
-    "start:report": "node dist/servers/report/index.js"
+    "start:report": "node dist/servers/report/index.js",
+    "start:repo": "node dist/servers/repo/index.js"
   },
   "bin": {
     "java-vuln-remediation": "dist/servers/osv/index.js",
     "sast-remediation-mcp": "dist/servers/sast/index.js",
-    "sast-report-state-mcp": "dist/servers/report/index.js"
+    "sast-report-state-mcp": "dist/servers/report/index.js",
+    "sast-repo-mcp": "dist/servers/repo/index.js"
   },
   "keywords": [
     "mcp",
