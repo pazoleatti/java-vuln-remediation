@@ -313,7 +313,7 @@ mcpServer.registerTool(
   "get_run_summary",
   {
     description:
-      "Aggregated read of a run for the final report: counts by status, list of fix commits with summaries + regression notes, list of rejections with reasoning, list of failed fixes with failure reasons.",
+      "Aggregated read of a run for the final report: counts by status, list of pending findings (those not picked up for triage — e.g. due to --limit), list of fix commits with summaries + regression notes, list of rejections with reasoning, list of failed fixes with failure reasons.",
     inputSchema: {
       sastUuid: z.string().min(1).optional().describe("If omitted, summarises the entire state file."),
     },
@@ -334,6 +334,15 @@ mcpServer.registerTool(
       };
       for (const v of scope) counts[v.status] += 1;
 
+      const pending = scope
+        .filter((v) => v.status === "pending")
+        .map((v) => ({
+          vulnerabilityId: v.vulnerabilityId,
+          sastUuid: v.sastUuid,
+          severity: v.severity,
+          cwe: v.cwe,
+          title: v.title,
+        }));
       const fixed = scope
         .filter((v) => v.status === "fixed")
         .map((v) => ({
@@ -373,6 +382,7 @@ mcpServer.registerTool(
         sastUuid: sastUuid ?? null,
         total: scope.length,
         counts,
+        pending,
         fixed,
         rejected,
         failed,

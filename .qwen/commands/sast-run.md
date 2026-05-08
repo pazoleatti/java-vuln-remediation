@@ -7,7 +7,7 @@ description: Run the full SAST remediation pipeline for a given commit + Nexus b
 Operator invocation:
 
 ```
-/sast-run --commit=<hash> --nexus=<url> [--jira=<KEY>]
+/sast-run --commit=<hash> --nexus=<url> [--jira=<KEY>] [--limit=<N>]
 ```
 
 Raw argument string from the operator: `{{args}}`
@@ -25,13 +25,14 @@ You also have the following **skills** available — load and consult them at th
 
 ## Step 0 — Parse the invocation arguments
 
-From `{{args}}` extract three named flags (whitespace-separated, `--name=value` form):
+From `{{args}}` extract four named flags (whitespace-separated, `--name=value` form):
 
 - `--commit=<hash>` — **required.** Git commit the SAST scan should target. Bind to `commitHash`.
 - `--nexus=<url>` — **required.** Nexus distribution URL of the built artifact. Bind to `distributionUrl`.
 - `--jira=<KEY>` — optional on the command line. If absent, ask the operator for it **before** any fix delegation begins (Phase 3 entry); do **not** invent a placeholder. The JIRA key matches `^[A-Z][A-Z0-9_]+-\d+$`.
+- `--limit=<N>` — optional. Positive integer (`N >= 1`) capping how many findings get triaged this run. Bind to `triageLimit` (default: unbounded). Findings beyond the cap stay `pending` and surface in the final report's **Skipped** section.
 
-If either required flag is missing or malformed, abort with a one-line message stating which flag is missing — do not attempt the run.
+If either required flag is missing or malformed, abort with a one-line message stating which flag is missing — do not attempt the run. `--limit` that is not a positive integer (`0`, negative, non-numeric) is also a malformed-flag abort — do **not** silently treat it as unbounded.
 
 Generate a short `runId` from the current timestamp (e.g. `YYYYMMDD-HHMM`). Use it for the fix-branch name (`sast-fix/<commit>-<runId>`) and the final report filename (`sast-report-<runId>.md`).
 
@@ -68,7 +69,8 @@ Apply the **`sast-fetch-report`** skill end-to-end:
 
 1. `sast-report-state-mcp.list_by_status({ status: "pending", sastUuid: reportUuid })` → list of `vulnerabilityHash`es.
 2. Sort: severity descending (`CRITICAL > HIGH > MEDIUM > LOW > INFO`), `dates.expirationDate` ascending as tie-breaker.
-3. For each `vulnerabilityHash` in order, **delegate to the `triage-agent` Named Subagent** with this invocation payload:
+3. If `triageLimit` is set, slice the sorted list to the **first `triageLimit`** entries. The remainder is left in `pending` for a future run; record the deferred count for Step 5's Skipped section. Without the flag, process the full list.
+4. For each `vulnerabilityHash` in order, **delegate to the `triage-agent` Named Subagent** with this invocation payload:
 
    ```
    reportUuid: <reportUuid>
@@ -76,8 +78,8 @@ Apply the **`sast-fetch-report`** skill end-to-end:
    ```
 
    The delegate runs in an isolated context, writes its verdict via `update_triage_result`, and exits. You don't read its return value — state is the source of truth.
-4. After each delegate, `repo-mcp.is_working_tree_clean`. The Triage Agent has no write tools; a dirty tree here is a bug. If you see one, `repo-mcp.reset_working_tree` and log it for the final report's "Anomalies" section.
-5. Continue iterating until `list_by_status({ status: "pending" })` returns empty. Do **not** rebuild the index between Phase 2 and Phase 3.
+5. After each delegate, `repo-mcp.is_working_tree_clean`. The Triage Agent has no write tools; a dirty tree here is a bug. If you see one, `repo-mcp.reset_working_tree` and log it for the final report's "Anomalies" section.
+6. Continue iterating until the sliced list is exhausted. Without `--limit`, that means `list_by_status({ status: "pending" })` returns empty; with `--limit`, residual `pending` entries are expected and feed Step 5's Skipped section. Do **not** rebuild the index between Phase 2 and Phase 3.
 
 ## Step 4 — Fix phase (orchestrator Phase 3)
 
@@ -99,14 +101,15 @@ Apply the **`sast-fetch-report`** skill end-to-end:
 
 1. `sast-report-state-mcp.get_run_summary({ sastUuid: reportUuid })` → structured roll-up.
 2. Render the operator-facing markdown **yourself** — this rendering step is not delegated. Required sections in this order:
-   - **Header** — `runId`, `--commit`, branch HEAD before run, fix-branch name, `reportUuid`, `taskUuid`, JIRA key, severity histogram from `vulnerabilityCounts`, totals (pending / triaged / confirmed / fixed / fix_failed / obsolete).
+   - **Header** — `runId`, `--commit`, branch HEAD before run, fix-branch name, `reportUuid`, `taskUuid`, JIRA key, applied `--limit` (or `unbounded`), severity histogram from `vulnerabilityCounts`, totals (pending / triaged / confirmed / fixed / fix_failed / obsolete).
    - **Rejected** — one entry per rejected finding: `vulnerabilityHash`, location (`artifactName:location.line` + `target`), CWE, severity, and the Triage Agent's full reasoning **verbatim** — quote it, do not summarise. The reasoning is the auditable artefact.
    - **Fixed** — one entry per fixed finding: `vulnerabilityHash`, commit hash, one-line fix summary, regression-test instructions verbatim from `update_fix_result`.
    - **Fix failed** — one entry per failure: `vulnerabilityHash`, location, CWE, the `failureReason` string. This is the operator's manual to-do list.
    - **Obsolete** — one entry per finding the working tree had already closed.
-   - **Anomalies** — anything that didn't fit the above (delegate exited without recording, dirty-tree safety-net triggered, etc.). Empty section if all clean.
+   - **Skipped (--limit)** — only when `--limit` was applied and `get_run_summary.pending` is non-empty. Lead with one line stating the cap (`--limit=N, M findings deferred`). One entry per untriaged finding: `vulnerabilityHash`, severity, CWE, title. Omit the section entirely otherwise.
+   - **Anomalies** — anything that didn't fit the above (delegate exited without recording, dirty-tree safety-net triggered, etc.). Empty section if all clean. **Do not** put `--limit` deferrals here — they belong in **Skipped**.
 3. Save with `repo-mcp.write_file({ path: "sast-report-<runId>.md", content: <markdown> })`. The file is intentionally **uncommitted** — it is for the operator's review of this branch, not for the MR.
-4. Print to the operator: the fix-branch name, the report file path, and a one-line summary `N rejected, M fixed, K failed`.
+4. Print to the operator: the fix-branch name, the report file path, and a one-line summary `N rejected, M fixed, K failed` (append `, S skipped` when `--limit` deferred any findings).
 
 ## Hard rules (recap from `sast-orchestrator`)
 

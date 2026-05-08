@@ -38,6 +38,7 @@ The session enters this role when the operator runs `/sast-run --commit=<hash> -
 - `--commit=<hash>` — git commit the SAST scan should target.
 - `--nexus=<url>` — Nexus URL of the built artifact.
 - `--jira=<KEY>` — JIRA ticket for this remediation batch (used in commit subjects). If not provided as a flag, ask the operator before any fix delegation begins. Do **not** invent a placeholder — `commit-message-format` forbids it.
+- `--limit=<N>` — optional. Positive integer cap on how many findings are processed in this run. Applied **after** sorting in Phase 2 (top-N by severity DESC, expirationDate ASC). Findings beyond the cap stay `pending` in the state file and surface in the final report's **Skipped** section so the operator can resume them in a later run. If absent, the run is unbounded.
 
 Generate a `runId` at session start (short timestamp-based id, e.g. `20260508-1430`). Use it for the fix-branch name and the final report filename.
 
@@ -51,6 +52,7 @@ Generate a `runId` at session start (short timestamp-based id, e.g. `20260508-14
 6. **Per-delegate safety-net check.** After every fix-agent delegate exits, call `is_working_tree_clean`. If false, `reset_working_tree` and continue with the next finding (the delegate already recorded its outcome in state). This is a defence-in-depth check, not the primary error path — `fix-agent` is responsible for cleaning up after itself.
 7. **No human-in-the-loop inside the run.** Do not pause to ask the operator questions mid-phase. Rejected findings and failed fixes go into the final report. The only operator interaction is at the very end, when they review the branch + report. The single exception is missing `--jira` at start (constraint above).
 8. **Branch ownership.** You — and only you — create and check out the fix branch. Sub-agents have no branch tools in their allowlists. The branch name is `sast-fix/<commit-hash>-<runId>`.
+9. **Deterministic `--limit`.** When `--limit=N` is set, apply the cap **after** the Phase 2 sort, not before. The same report + same flag must always pick the same top-N. The cap applies to the triage phase only; Phase 3 is implicitly bounded by what Triage promotes to `confirmed`. `init_run` always seeds **all** findings — never pre-filter the report.
 
 ## Run flow
 
@@ -78,9 +80,10 @@ If the report has zero findings, skip Phases 2–3 and go straight to Phase 4 wi
 
 1. `list_by_status({ status: "pending", sastUuid: reportUuid })` → list of `vulnerabilityHash`es.
 2. Sort: severity descending (CRITICAL > HIGH > MEDIUM > LOW > INFO), then `dates.expirationDate` ascending as tie-breaker.
-3. For each `vulnerabilityHash` in order: invoke `triage-agent` with `{ reportUuid, vulnerabilityId: <hash> }`. The delegate writes its verdict via `update_triage_result` and exits.
-4. After each delegate, sanity-check `is_working_tree_clean` — Triage Agent has no write tools, so a dirty tree here is a bug; if you see one, `reset_working_tree` and log it for the final report.
-5. Continue to the next finding even if a delegate returned an unexpected message — its state record is what counts; you read it on the next iteration.
+3. If `--limit=N` was supplied, take the **first N** entries of the sorted list. The remainder stays `pending` and is reported in Phase 4 under **Skipped**. Without `--limit`, process the full list.
+4. For each `vulnerabilityHash` in order: invoke `triage-agent` with `{ reportUuid, vulnerabilityId: <hash> }`. The delegate writes its verdict via `update_triage_result` and exits.
+5. After each delegate, sanity-check `is_working_tree_clean` — Triage Agent has no write tools, so a dirty tree here is a bug; if you see one, `reset_working_tree` and log it for the final report.
+6. Continue to the next finding even if a delegate returned an unexpected message — its state record is what counts; you read it on the next iteration.
 
 You do **not** rebuild the index between Phase 2 and Phase 3.
 
@@ -98,12 +101,13 @@ You do **not** rebuild the index between Phase 2 and Phase 3.
 
 1. `get_run_summary({ sastUuid: reportUuid })` → structured roll-up of all state records.
 2. Render the operator-facing markdown yourself (do **not** delegate this). Required sections, in this order:
-   - **Header** — `runId`, `--commit`, current branch HEAD before run, fix-branch name, `reportUuid`, `taskUuid`, JIRA key, severity histogram from `vulnerabilityCounts`, totals (pending/triaged/confirmed/fixed/fix_failed/obsolete).
+   - **Header** — `runId`, `--commit`, current branch HEAD before run, fix-branch name, `reportUuid`, `taskUuid`, JIRA key, applied `--limit` (or `unbounded`), severity histogram from `vulnerabilityCounts`, totals (pending/triaged/confirmed/fixed/fix_failed/obsolete).
    - **Rejected** — one entry per rejected finding: `vulnerabilityHash`, location (`artifactName:location.line` + `target`), CWE, severity, and the Triage Agent's full reasoning. The reasoning is the auditable artefact — quote it, do not summarise.
    - **Fixed** — one entry per fixed finding: `vulnerabilityHash`, commit hash, one-line fix summary, regression-test instructions verbatim from `update_fix_result`.
    - **Fix failed** — one entry per failure: `vulnerabilityHash`, location, CWE, the `failureReason` string. This is the operator's manual to-do list.
    - **Obsolete** — one entry per finding the working tree had already closed.
-   - **Anomalies** — anything that didn't fit the above (delegate exited without recording, dirty-tree safety-net triggered, etc.). Empty section if all clean.
+   - **Skipped (--limit)** — only present when `--limit` was applied and `get_run_summary.pending` is non-empty. One entry per untriaged finding: `vulnerabilityHash`, severity, CWE, title. Lead the section with one line stating the cap (`--limit=N, M findings deferred`). Empty/omitted otherwise.
+   - **Anomalies** — anything that didn't fit the above (delegate exited without recording, dirty-tree safety-net triggered, etc.). Empty section if all clean. **Do not** put `--limit` deferrals here — they go in the Skipped section.
 3. Save: `repo-mcp.write_file({ path: "sast-report-<runId>.md", content: <markdown> })`. The path is **outside** the fix branch's tracked content (the working-tree-write happens after the last fix; the file is intentionally not committed — it is for the operator, not for the MR).
 4. Print to the operator: the fix-branch name, the report file path, and a one-line summary (`N rejected, M fixed, K failed`).
 
@@ -113,7 +117,7 @@ The report is the final artefact. The operator reviews the branch + the report, 
 
 | Phase | Error class | Action |
 |---|---|---|
-| Preflight | dirty working tree, missing `--jira` | Abort before any side effects |
+| Preflight | dirty working tree, missing `--jira`, malformed `--limit` (non-integer or `< 1`) | Abort before any side effects |
 | Phase 1 | `sast-fetch-report` abort condition | Abort; surface reason; no branch created |
 | Phase 1 | branch already exists | Abort; collision with prior run |
 | Phase 1 | `build_deep_index` fails | Abort the run |
