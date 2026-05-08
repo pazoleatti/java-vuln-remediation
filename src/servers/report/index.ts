@@ -1,12 +1,8 @@
 #!/usr/bin/env node
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
-
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import * as z from "zod/v4";
 
-import { ingestVulnerabilities } from "./ingest.js";
 import {
   findVulnState,
   readState,
@@ -35,12 +31,6 @@ function errorResult(message: string) {
   };
 }
 
-async function loadReport(reportPath: string): Promise<unknown> {
-  const abs = resolve(reportPath);
-  const text = await readFile(abs, "utf8");
-  return JSON.parse(text) as unknown;
-}
-
 const mcpServer = new McpServer({
   name: "sast-report-state-mcp",
   version: "0.1.0",
@@ -51,23 +41,28 @@ const mcpServer = new McpServer({
 // ────────────────────────────────────────────────────────────────────────────
 // init_run
 // ────────────────────────────────────────────────────────────────────────────
+const initRunVulnSchema = z.object({
+  vulnerabilityId: z.string().min(1).describe("Stable identifier of the finding from the SAST report."),
+  severity: z.string().min(1).nullish(),
+  cwe: z.string().min(1).nullish(),
+  title: z.string().min(1).nullish(),
+});
+
 mcpServer.registerTool(
   "init_run",
   {
     description:
-      "Read a SAST report JSON from disk, extract vulnerabilities, and seed pending entries in the state file. Idempotent per (sastUuid, vulnerabilityId): existing records are preserved, new findings are appended.",
+      "Seed pending entries in the state file from a pre-extracted vulnerability list. The orchestrator is responsible for fetching the SAST report (via sast-mcp) and extracting the array — this server is storage-only and does not parse the report. Idempotent per (sastUuid, vulnerabilityId): existing records are preserved, new findings are appended.",
     inputSchema: {
       sastUuid: z.string().min(1).describe("UUID of the SAST report this run corresponds to."),
-      reportPath: z
-        .string()
+      vulnerabilities: z
+        .array(initRunVulnSchema)
         .min(1)
-        .describe("Filesystem path to the SAST report JSON (e.g. the file written by sast-mcp's get_report cache)."),
+        .describe("Array of vulnerabilities to seed as pending in a single call."),
     },
   },
-  async ({ sastUuid, reportPath }) => {
+  async ({ sastUuid, vulnerabilities }) => {
     try {
-      const report = await loadReport(reportPath);
-      const ingested = ingestVulnerabilities(report);
       const state = await readState();
       const existingKeys = new Set(
         state.vulnerabilities
@@ -75,14 +70,15 @@ mcpServer.registerTool(
           .map((v) => v.vulnerabilityId)
       );
       let added = 0;
-      for (const v of ingested) {
-        if (existingKeys.has(v.id)) continue;
+      for (const v of vulnerabilities) {
+        if (existingKeys.has(v.vulnerabilityId)) continue;
+        existingKeys.add(v.vulnerabilityId);
         state.vulnerabilities.push({
-          vulnerabilityId: v.id,
+          vulnerabilityId: v.vulnerabilityId,
           sastUuid,
-          severity: v.severity,
-          cwe: v.cwe,
-          title: v.title,
+          severity: v.severity ?? null,
+          cwe: v.cwe ?? null,
+          title: v.title ?? null,
           status: "pending",
           triageReasoning: null,
           fixCommitHash: null,
@@ -97,9 +93,9 @@ mcpServer.registerTool(
       return textResult({
         sastUuid,
         statePath: statePathForDisplay(),
-        ingested: ingested.length,
+        received: vulnerabilities.length,
         added,
-        alreadyPresent: ingested.length - added,
+        alreadyPresent: vulnerabilities.length - added,
         totalForRun: state.vulnerabilities.filter((v) => v.sastUuid === sastUuid).length,
       });
     } catch (e) {
