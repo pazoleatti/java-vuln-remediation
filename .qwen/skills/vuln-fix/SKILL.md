@@ -14,17 +14,19 @@ Load `sast-report-format` before processing any finding — it is the single sou
 ## Required MCP servers
 
 - **sast-remediation-mcp** — `get_vulnerability(reportUuid, vulnerabilityId)` for finding details.
-- **sast-report-state-mcp** — `list_by_status({ status: "confirmed" })`, `get_vulnerability_state`, `update_fix_result`. State at `.sast-agent/state.json`.
-- **code-index** — semantic code navigation. **The only sanctioned way to read or search the codebase.**
+- **sast-report-state-mcp** — `list_by_status({ status: "confirmed" })`, `get_vulnerability_state`, `update_fix_result`. Terminal statuses are `fixed` / `fix_failed` / `obsolete` (no `blocked`). State at `.sast-agent/state.json`.
+- **repo-mcp** — `read_file` for current bytes, `write_file` / `apply_patch` to land the fix, `commit` to record it. The only sanctioned write surface.
+- **code-index** — semantic code navigation. The only sanctioned way to *search* the codebase.
 
 ## Hard rules
 
-1. **Re-read before you edit.** `location.text` is a scan-time snapshot. The working tree may have drifted (other commits landed, prior fixes applied, files renamed). Before any edit, locate the symbol via `code-index` `get_symbol_body` using `location.target`, and verify the line you are about to change still matches the report's `text`. If it doesn't match, re-locate by symbol semantics, not by line number.
-2. **Code research via `code-index` only.** `find_files`, `get_file_summary`, `get_symbol_body`, symbol-reference search. Do **not** use raw `grep`, `read_file`, or `cat` for investigation. The `Edit` / `Write` tools are still how you apply the fix — code-index is read-only.
-3. **Never invoke `code-index` admin tools** (`build_deep_index`, `clear_settings`, `configure_file_watcher`, ...). If the index is stale, stop and tell the operator.
-4. **One commit per `vulnerabilityHash`.** No batching, no opportunistic refactors, no formatter sweeps, no unrelated cleanups, no fixing two findings at once even when they sit in the same method. Each fix must be revertable in isolation. If the same edit genuinely closes multiple findings, pick the primary `vulnerabilityHash` and reference the others in the commit body — but the diff must be exactly what is needed for that primary finding.
-5. **Phase discipline.** You write only via `update_fix_result` (and via git). If a record's `status != confirmed`, skip it — you do not re-triage, re-fix, or revisit triaged-rejected findings.
-6. **Base on the scanned commit, or verify drift is benign.** `scanObjectInfo.hash` is what the SAST tool saw. If the working tree has moved past it, you may still apply the fix on the current branch tip, but you must verify (by re-reading the symbol via `code-index`) that the vulnerable code still exists. If it has already been fixed by an unrelated change, mark `update_fix_result` as `obsolete` with reasoning — do not create an empty commit.
+1. **Re-read before you edit.** `location.text` is a scan-time snapshot. The working tree may have drifted (other commits landed, prior fixes applied, files renamed). Before any edit, locate the symbol via `code-index` `get_symbol_body` using `location.target`, then read the exact current bytes via `repo-mcp.read_file`. Verify the line you are about to change still matches the report's `text`. If it doesn't match, re-locate by symbol semantics, not by line number.
+2. **Decide before writing.** All planning — re-location, fix shape, mental smoke-check — happens **before** the first `repo-mcp.write_file` or `apply_patch`. There is no rollback in your toolset. Either you produce one new commit on the current branch, or you produce no edits at all and record `fix_failed` / `obsolete`. Never partially apply a patch and abandon it.
+3. **Code research via `code-index` only.** `find_files`, `get_file_summary`, `get_symbol_body`, symbol-reference search. The fix lands via `repo-mcp.write_file` / `apply_patch`; the commit lands via `repo-mcp.commit`. Do not invoke shell `grep`, raw `cat`, or any other write path.
+4. **Never invoke `code-index` admin tools** (`build_deep_index`, `clear_settings`, `configure_file_watcher`, ...). If the index is stale, stop and tell the operator.
+5. **One commit per `vulnerabilityHash`.** No batching, no opportunistic refactors, no formatter sweeps, no unrelated cleanups, no fixing two findings at once even when they sit in the same method. Each fix must be revertable in isolation. If the same edit genuinely closes multiple findings, pick the primary `vulnerabilityHash` and reference the others in the commit body — but the diff must be exactly what is needed for that primary finding.
+6. **Phase discipline.** You write only via `update_fix_result` (and via git through `repo-mcp.commit`). If a record's `status != confirmed`, skip it — you do not re-triage, re-fix, or revisit triaged-rejected findings.
+7. **Base on the scanned commit, or verify drift is benign.** `scanObjectInfo.hash` is what the SAST tool saw. If the working tree has moved past it, you may still apply the fix on the current branch tip, but you must verify (by re-reading the symbol via `code-index` + `repo-mcp.read_file`) that the vulnerable code still exists. If it has already been fixed by an unrelated change — including by a previous fix in this same run — mark `update_fix_result` as `obsolete` with reasoning. Do not create an empty commit.
 
 ## Procedure
 
@@ -43,9 +45,10 @@ Load `sast-report-format` before processing any finding — it is the single sou
 
 1. `find_files` for `artifactName`. If the file is gone or renamed, re-find by `target` symbol search.
 2. `get_symbol_body` for `location.target`. Diff the current body against `location.text`:
-   - **Match** → proceed to fix.
-   - **Drift, vulnerable code still present** → fix at the new location.
-   - **Drift, vulnerable code already gone** → call `update_fix_result({ status: "obsolete", reasoning })` citing the symbol and what changed; do not commit.
+   - **Match** → proceed to plan the fix.
+   - **Drift, vulnerable code still present** → plan the fix at the new location.
+   - **Drift, vulnerable code already gone** (including: a previous fix in this run already closed it) → record `update_fix_result({ vulnerabilityId, status: "obsolete", reasoning })` citing the symbol and what changed; do not commit, do not write anything.
+   - **Drift, vulnerable shape still present but local context has changed enough that the fix you would have applied no longer fits** → record `update_fix_result({ vulnerabilityId, status: "fix_failed", failureReason: "conflict_with_prior_fix" })` (or another specific reason). Do not improvise a new patch on top of a moving target.
 3. Walk to the entry point one more time via symbol references. The Triage Agent already did this — your job is to confirm the fix you are about to apply actually closes the path they identified, not some other site of the same pattern.
 
 ### 4. Apply the fix — CWE pattern catalog
@@ -110,47 +113,43 @@ Pick the narrowest fix that closes the specific path Triage identified. Do not "
 - `element.html(userInput)` / `innerHTML = ...` → `.text(userInput)` / `textContent = ...`.
 - `$compile(userHtml)(scope)` → eliminate; render via the directive system with a known template.
 
-### 5. Validate the fix locally
+### 5. Plan and apply the fix
 
-Before commiting:
-- `npm run build` if you touched TypeScript in this repo.
-- For the target Java/Groovy project: run whatever build / test command the project's docs specify. If none is documented, do not invent one — note in `update_fix_result` that the change is unverified.
-- If a unit test already covers the affected symbol, run it. Do not write new tests yourself — that is regression guidance for the human reviewer (see step 7).
+Validation happens on the **plan**, not on a half-applied patch. Before invoking `repo-mcp.write_file` / `apply_patch`:
+- Have a complete patch in mind. Know which lines change, which imports need adjusting, and what the surrounding code expects.
+- If the project has a cheap typecheck/compile (`npm run build`, `tsc`, `mvn compile`) and you can reason about whether your change keeps it passing without running it, do so. Actually running the build is allowed but optional — the goal is to reject unworkable plans before they touch disk.
+- If at any point you realise the fix is unworkable (pattern doesn't fit, the surrounding idiom rules it out, dependencies aren't available), do not write. Record `fix_failed` per Hard rule 2 and exit.
+
+Then, and only then:
+- Apply the edits via `repo-mcp.write_file` (full-file replace) or `repo-mcp.apply_patch` (unified diff).
+- Do **not** edit and then "see if it works." There is no rollback path in your allowlist.
 
 ### 6. Commit — atomic, one per finding
 
-Required shape:
-
-```
-fix(sast/<CWE>): <one-line summary> [<vulnerabilityHash>]
-
-Finding: <code> @ <artifactName>:<location.line> (target=<location.target>)
-Severity: <CRITICAL|HIGH|MEDIUM|LOW|INFO>   CWE: <cwe or "n/a">
-Report: <reportUuid>   Triaged-by: <triage-agent-id-or-author>
-
-Vulnerable shape: <one sentence — what the offending code did>
-Remediation:      <one sentence — what this commit changes>
-Why this closes it: <one sentence — which guard/structure now blocks the path Triage named>
-
-Refs: <related vulnerabilityHashes if this commit closes more than one — should be rare>
-```
+Build the commit message per **`commit-message-format`** (loaded as a separate skill — it is the authoritative format for subject + body). Then call `repo-mcp.commit({ message: <full message> })`.
 
 Rules:
-- **Subject ≤ 72 chars.** The bracketed hash may be a short prefix (first 12 chars) if the full hash is too long.
-- **Diff includes only the remediation.** No formatter changes, no unrelated imports, no `// TODO` cleanup. If the formatter rewrote a file you opened, revert the cosmetic chunks.
-- **Branch base** is the current branch tip the operator is working on, unless the operator says otherwise. Don't fork off `scanObjectInfo.hash` unilaterally — but cite it in the body if drift was non-trivial.
-- **No squash, no amend.** Each `vulnerabilityHash` gets its own commit object; if you fixed something wrong, add a follow-up fix commit, don't rewrite history.
+- **Diff includes only the remediation.** No formatter changes, no unrelated imports, no `// TODO` cleanup. If the formatter rewrote a file you opened, revert the cosmetic chunks before committing.
+- **Branch base** is the current branch tip the orchestrator put you on (`sast-fix/<commit>-<runId>`). Don't switch branches; you have no branch tools.
+- **No squash, no amend, no `--no-verify`, no `--force`.** Each `vulnerabilityHash` gets its own commit object; if you fixed something wrong, add a follow-up fix commit, don't rewrite history.
+- **Validate the subject against the regex in `commit-message-format` before invoking `commit`.** If it fails, fix the message, do not commit.
 
 ### 7. Record the result + regression guidance
 
-`update_fix_result({ vulnerabilityHash, sastUuid, status, commitSha, regression, reasoning })`.
+Exactly one `update_fix_result` call per invocation. Pick the matching shape:
 
-- `status`: `fixed` | `obsolete` | `blocked` (`blocked` = you can't safely fix without a design call; explain).
-- `commitSha`: the commit you just created, or empty for `obsolete`/`blocked`.
-- `regression`: structured guidance for the human reviewer / QA — see format below.
-- `reasoning`: the same shape as triage reasoning — what you changed and why it closes the Triage-identified path.
+- **Fixed:**
+  `update_fix_result({ vulnerabilityId, status: "fixed", fixCommitHash, fixSummary, regressionInstructions })`
+- **Obsolete (vulnerable code already gone):**
+  `update_fix_result({ vulnerabilityId, status: "obsolete", reasoning })`
+- **Fix failed (planned fix unworkable, no edits made):**
+  `update_fix_result({ vulnerabilityId, status: "fix_failed", failureReason: "<short, specific>" })`
 
-**`regression` required structure:**
+There is no `blocked` status — `fix_failed` covers "I couldn't safely fix this", with the reason narrating *why*. Examples of good `failureReason` values: `conflict_with_prior_fix`, `pattern_not_applicable`, `no_narrow_fix_identified`, `dependency_unavailable`, `requires_design_decision: <one-line>`. "could not fix" is not enough.
+
+`fixCommitHash` is the SHA returned by `repo-mcp.commit`; `fixSummary` is one paragraph (what the offending code did, what now changes, which guard closes the Triage-named path).
+
+**`regressionInstructions` required structure** (only for `status: "fixed"`):
 
 ```
 Attack vector to replay:
@@ -184,12 +183,12 @@ Back to step 1 until `list_by_status({ status: "confirmed" })` is empty. Each it
 - **Never `--no-verify` a commit, never `--force`-push, never amend a published commit.** If a pre-commit hook fails, fix the cause and create a new commit.
 - **Never delete tests that "started failing after the fix"** without first understanding why. A failing test after a security fix usually means the test was asserting on the vulnerable behaviour — convert it to assert on the fixed behaviour, do not delete.
 - **Never edit `src/servers/sast/auth.ts` or `src/shared/redact.ts`** as part of a SAST fix in this repo. Those touch JWT handling and need a separate review.
-- **If the fix requires a config / ops change** (rotating a credential, adding an env var, granting a permission), commit only the code part and call it out in `regression` + `reasoning`. Do not silently introduce env-var dependencies.
+- **If the fix requires a config / ops change** (rotating a credential, adding an env var, granting a permission), commit only the code part and call it out in `regressionInstructions` + `fixSummary`. Do not silently introduce env-var dependencies.
 
 ## Anti-patterns — do not do
 
 - Don't apply the `fixGuide` text verbatim. It is generic; your fix must match the specific code shape.
-- Don't add a `// TODO: review` comment instead of fixing. Either fix it or mark the finding `blocked` with reasoning.
+- Don't add a `// TODO: review` comment instead of fixing. Either fix it or mark the finding `fix_failed` with a specific `failureReason`.
 - Don't fix "while you're there" — every line in the diff must be needed for this `vulnerabilityHash`.
 - Don't rely on a downstream sanitiser unless you've inspected and named it. "Probably handled elsewhere" is not a fix.
 - Don't write the regression test yourself. Your output is the *guidance*; the test is for the human reviewer to author and own.

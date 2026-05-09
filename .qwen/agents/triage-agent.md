@@ -62,5 +62,5 @@ That is the entire job.
 ## What success looks like
 
 - `update_triage_result` succeeded with a verdict and a 5–15 line reasoning that cites specific symbols, files, lines, and the decisive guard (or its absence).
-- No edits to the working tree. `is_working_tree_clean` (checked by orchestrator after you exit) returns true.
+- No edits to the working tree. Triage has no write tools in its allowlist — a dirty tree after you exit would be a bug in the allowlist itself, not a recoverable anomaly.
 - No fix-state writes. The state record's `fixCommitHash`, `fixSummary`, etc. remain untouched.

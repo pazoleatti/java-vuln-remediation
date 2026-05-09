@@ -39,9 +39,8 @@ Generate a short `runId` from the current timestamp (e.g. `YYYYMMDD-HHMM`). Use 
 ## Step 1 — Preflight (orchestrator Phase 0)
 
 1. Validate flags as above.
-2. `repo-mcp.is_working_tree_clean` must be true. If the operator has uncommitted local changes, abort and instruct them to stash or commit first. Do not auto-stash.
-3. `repo-mcp.get_current_branch` and `repo-mcp.get_head_commit` — record both for the final report header.
-4. Sanity-check that `get_head_commit` matches `--commit` or that `--commit` is reachable as an ancestor. Mismatch is a warning, not an abort — fixes will still apply on the current tree, with `fix-agent` re-locating drifted code via `code-index`.
+2. `repo-mcp.get_current_branch` and `repo-mcp.get_head_commit` — record both for the final report header. (You do not check that the working tree is clean: the operator owns that responsibility, and `fix-agent` only writes after it has decided the fix is applicable.)
+3. Sanity-check that `get_head_commit` matches `--commit` or that `--commit` is reachable as an ancestor. Mismatch is a warning, not an abort — fixes will still apply on the current tree, with `fix-agent` re-locating drifted code via `code-index`.
 
 ## Step 2 — Preparation (orchestrator Phase 1)
 
@@ -78,8 +77,7 @@ Apply the **`sast-fetch-report`** skill end-to-end:
    ```
 
    The delegate runs in an isolated context, writes its verdict via `update_triage_result`, and exits. You don't read its return value — state is the source of truth.
-5. After each delegate, `repo-mcp.is_working_tree_clean`. The Triage Agent has no write tools; a dirty tree here is a bug. If you see one, `repo-mcp.reset_working_tree` and log it for the final report's "Anomalies" section.
-6. Continue iterating until the sliced list is exhausted. Without `--limit`, that means `list_by_status({ status: "pending" })` returns empty; with `--limit`, residual `pending` entries are expected and feed Step 5's Skipped section. Do **not** rebuild the index between Phase 2 and Phase 3.
+5. Continue iterating until the sliced list is exhausted. Without `--limit`, that means `list_by_status({ status: "pending" })` returns empty; with `--limit`, residual `pending` entries are expected and feed Step 5's Skipped section. Do **not** rebuild the index between Phase 2 and Phase 3.
 
 ## Step 4 — Fix phase (orchestrator Phase 3)
 
@@ -93,9 +91,8 @@ Apply the **`sast-fetch-report`** skill end-to-end:
      vulnerabilityId: <vulnerabilityHash>
      jiraKey: <jiraKey>
      ```
-   - After the delegate exits, run the safety net: `repo-mcp.is_working_tree_clean`. If false → `repo-mcp.reset_working_tree` and continue. The delegate already recorded its outcome in state.
-   - Read `sast-report-state-mcp.get_vulnerability_state({ vulnerabilityId })` to confirm the delegate moved the record to a terminal status (`fixed` / `fix_failed` / `obsolete`). If it is still `confirmed`, log the silent-failure as an anomaly and continue with the next finding.
-5. Run continues through individual `fix_failed` outcomes — never abort the whole run because one fix failed. Only Phase 0/1 conditions abort the run.
+   - Read `sast-report-state-mcp.get_vulnerability_state({ vulnerabilityId })` to confirm the delegate moved the record to a terminal status (`fixed` / `fix_failed` / `obsolete`). If it is still `confirmed`, log the silent-failure as an anomaly and continue with the next finding. The fix-agent contract is binary — either a new commit landed or no edits were made — so you do not check or reset the working tree between delegations.
+5. Run continues through individual `fix_failed` outcomes — never abort the whole run because one fix failed. A finding that conflicts with code already changed by an earlier fix in this run is the typical `fix_failed` cause; it is recorded and reported. Only Phase 0/1 conditions abort the run.
 
 ## Step 5 — Final report (orchestrator Phase 4)
 
@@ -107,7 +104,7 @@ Apply the **`sast-fetch-report`** skill end-to-end:
    - **Fix failed** — one entry per failure: `vulnerabilityHash`, location, CWE, the `failureReason` string. This is the operator's manual to-do list.
    - **Obsolete** — one entry per finding the working tree had already closed.
    - **Skipped (--limit)** — only when `--limit` was applied and `get_run_summary.pending` is non-empty. Lead with one line stating the cap (`--limit=N, M findings deferred`). One entry per untriaged finding: `vulnerabilityHash`, severity, CWE, title. Omit the section entirely otherwise.
-   - **Anomalies** — anything that didn't fit the above (delegate exited without recording, dirty-tree safety-net triggered, etc.). Empty section if all clean. **Do not** put `--limit` deferrals here — they belong in **Skipped**.
+   - **Anomalies** — anything that didn't fit the above (delegate exited without recording an outcome, etc.). Empty section if all clean. **Do not** put `--limit` deferrals here — they belong in **Skipped**.
 3. Save with `repo-mcp.write_file({ path: "sast-report-<runId>.md", content: <markdown> })`. The file is intentionally **uncommitted** — it is for the operator's review of this branch, not for the MR.
 4. Print to the operator: the fix-branch name, the report file path, and a one-line summary `N rejected, M fixed, K failed` (append `, S skipped` when `--limit` deferred any findings).
 

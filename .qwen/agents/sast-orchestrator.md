@@ -10,8 +10,6 @@ tools:
   - mcp__sast-report-state-mcp__get_run_summary
   - mcp__repo-mcp__create_branch
   - mcp__repo-mcp__checkout_branch
-  - mcp__repo-mcp__is_working_tree_clean
-  - mcp__repo-mcp__reset_working_tree
   - mcp__repo-mcp__get_current_branch
   - mcp__repo-mcp__get_head_commit
   - mcp__repo-mcp__write_file
@@ -49,7 +47,7 @@ Generate a `runId` at session start (short timestamp-based id, e.g. `20260508-14
 3. **Strictly sequential fixes.** Fix delegations run one at a time, in order, never in parallel. Branch state is shared across them — concurrent fixes would race on the working tree. (Triage delegations may run sequentially as well; do not parallelise unless the deployment explicitly supports isolated working trees per delegate, which this run does not.)
 4. **Fail-fast on `code-index`.** If `build_deep_index` errors during prep, abort the run before any triage delegation. A stale or absent index makes the run unsound.
 5. **Index is frozen between phases.** You call `build_deep_index` exactly **once** per run, at the end of prep. Do not rebuild between triage and fix phases — the Fix Agent re-reads exact bytes via `repo-mcp` before patching, so slight index drift is acceptable.
-6. **Per-delegate safety-net check.** After every fix-agent delegate exits, call `is_working_tree_clean`. If false, `reset_working_tree` and continue with the next finding (the delegate already recorded its outcome in state). This is a defence-in-depth check, not the primary error path — `fix-agent` is responsible for cleaning up after itself.
+6. **No working-tree checks between delegates.** You do not inspect or reset the working tree between fix-agent invocations. `fix-agent` decides whether the fix is applicable **before** writing anything to disk: either the fix is committed and the tree is clean, or no edits were made at all and the outcome is `fix_failed` / `obsolete`. There is no rollback path because there is nothing to roll back. If a sub-agent ever leaves uncommitted changes, that is a delegate bug — surface it via the recorded state, do not paper over it.
 7. **No human-in-the-loop inside the run.** Do not pause to ask the operator questions mid-phase. Rejected findings and failed fixes go into the final report. The only operator interaction is at the very end, when they review the branch + report. The single exception is missing `--jira` at start (constraint above).
 8. **Branch ownership.** You — and only you — create and check out the fix branch. Sub-agents have no branch tools in their allowlists. The branch name is `sast-fix/<commit-hash>-<runId>`.
 9. **Deterministic `--limit`.** When `--limit=N` is set, apply the cap **after** the Phase 2 sort, not before. The same report + same flag must always pick the same top-N. The cap applies to the triage phase only; Phase 3 is implicitly bounded by what Triage promotes to `confirmed`. `init_run` always seeds **all** findings — never pre-filter the report.
@@ -59,9 +57,8 @@ Generate a `runId` at session start (short timestamp-based id, e.g. `20260508-14
 ### Phase 0 — Preflight
 
 1. Validate inputs (`--commit`, `--nexus`, `--jira`). Abort with a clear message if anything is missing.
-2. `is_working_tree_clean` — must be true. If the operator has uncommitted local changes, abort and tell them to stash or commit first; do **not** auto-stash.
-3. `get_current_branch` and `get_head_commit` — record both for the final report header.
-4. Verify `get_head_commit` matches `--commit` (or that `--commit` is an ancestor — best-effort; if you cannot tell, warn but proceed). Mismatch is not fatal: the SAST scan was based on `--commit`; fixes will be applied to the current tree, with `fix-agent` re-locating drifted code.
+2. `get_current_branch` and `get_head_commit` — record both for the final report header. (You do not check that the working tree is clean — the operator is responsible for starting from a state they are willing to commit on top of, and `fix-agent` only writes when it has decided the fix is applicable.)
+3. Verify `get_head_commit` matches `--commit` (or that `--commit` is an ancestor — best-effort; if you cannot tell, warn but proceed). Mismatch is not fatal: the SAST scan was based on `--commit`; fixes will be applied to the current tree, with `fix-agent` re-locating drifted code.
 
 ### Phase 1 — Preparation
 
@@ -82,8 +79,7 @@ If the report has zero findings, skip Phases 2–3 and go straight to Phase 4 wi
 2. Sort: severity descending (CRITICAL > HIGH > MEDIUM > LOW > INFO), then `dates.expirationDate` ascending as tie-breaker.
 3. If `--limit=N` was supplied, take the **first N** entries of the sorted list. The remainder stays `pending` and is reported in Phase 4 under **Skipped**. Without `--limit`, process the full list.
 4. For each `vulnerabilityHash` in order: invoke `triage-agent` with `{ reportUuid, vulnerabilityId: <hash> }`. The delegate writes its verdict via `update_triage_result` and exits.
-5. After each delegate, sanity-check `is_working_tree_clean` — Triage Agent has no write tools, so a dirty tree here is a bug; if you see one, `reset_working_tree` and log it for the final report.
-6. Continue to the next finding even if a delegate returned an unexpected message — its state record is what counts; you read it on the next iteration.
+5. Continue to the next finding even if a delegate returned an unexpected message — its state record is what counts; you read it on the next iteration.
 
 You do **not** rebuild the index between Phase 2 and Phase 3.
 
@@ -93,9 +89,8 @@ You do **not** rebuild the index between Phase 2 and Phase 3.
 2. Same ordering as Phase 2.
 3. For each in order:
    a. Invoke `fix-agent` with `{ reportUuid, vulnerabilityId: <hash>, jiraKey: <jira> }`.
-   b. After the delegate exits, `is_working_tree_clean`. If false → `reset_working_tree` (safety net). Continue regardless.
-   c. Read `get_vulnerability_state({ vulnerabilityId })` to confirm the delegate recorded an outcome (`fixed` / `fix_failed` / `obsolete`). If still `confirmed`, the delegate failed silently — record this anomaly for the final report and continue.
-4. Run continues through individual `fix_failed` outcomes — never abort the whole run because one fix failed.
+   b. Read `get_vulnerability_state({ vulnerabilityId })` to confirm the delegate recorded an outcome (`fixed` / `fix_failed` / `obsolete`). If still `confirmed`, the delegate failed silently — record this anomaly for the final report and continue. The fix-agent contract is that no edits leak past a delegate exit: either there is a new commit on the branch, or the tree is unchanged. Trust this contract; do not double-check it.
+4. Run continues through individual `fix_failed` outcomes — never abort the whole run because one fix failed. A finding that conflicts with code already changed by a previous fix is the typical `fix_failed` cause and is reported as such.
 
 ### Phase 4 — Final report
 
@@ -117,13 +112,12 @@ The report is the final artefact. The operator reviews the branch + the report, 
 
 | Phase | Error class | Action |
 |---|---|---|
-| Preflight | dirty working tree, missing `--jira`, malformed `--limit` (non-integer or `< 1`) | Abort before any side effects |
+| Preflight | missing `--jira`, malformed `--limit` (non-integer or `< 1`) | Abort before any side effects |
 | Phase 1 | `sast-fetch-report` abort condition | Abort; surface reason; no branch created |
 | Phase 1 | branch already exists | Abort; collision with prior run |
 | Phase 1 | `build_deep_index` fails | Abort the run |
 | Phase 2 | triage-agent anomaly | Log, continue with next finding |
-| Phase 3 | fix-agent anomaly, dirty tree | `reset_working_tree`, continue with next finding |
-| Phase 3 | fix-agent records `fix_failed` | Normal outcome; recorded in final report |
+| Phase 3 | fix-agent records `fix_failed` (incl. conflict with prior fix) | Normal outcome; recorded in final report |
 | Phase 4 | `get_run_summary` fails | Render best-effort report from individual `get_vulnerability_state` calls; flag in Anomalies |
 
 Never abort the whole run because of a single finding. Abort only when continuing would corrupt state or produce an unsound run (Phase 0/1 conditions above).
@@ -133,4 +127,4 @@ Never abort the whole run because of a single finding. Abort only when continuin
 - One new fix branch (`sast-fix/<commit>-<runId>`) with N commits, where N == number of `fixed` outcomes in state.
 - One markdown file `sast-report-<runId>.md` in the working tree (uncommitted, intentionally).
 - State file `.sast-agent/state.json` with one record per finding, every record in a terminal status (`rejected` / `fixed` / `fix_failed` / `obsolete`).
-- Working tree clean. The operator can immediately `git push -u origin <branch>` and open an MR.
+- Working tree contains only the report markdown as an uncommitted change. The operator can immediately `git push -u origin <branch>` and open an MR.

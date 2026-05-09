@@ -8,7 +8,9 @@
       "mcp__context7__resolve-library-id",
       "mcp__context7__query-docs",
       "Read(//c/Users/diomi/.claude/skills/**)",
-      "PowerShell(npm run *)"
+      "PowerShell(npm run *)",
+      "Bash(npx tsc *)",
+      "Bash(echo \"exit=$?\")"
     ]
   }
 }

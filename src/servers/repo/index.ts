@@ -47,7 +47,7 @@ const mcpServer = new McpServer({
   name: "repo-mcp",
   version: "0.1.0",
   description:
-    "Controlled access to the local git work tree: read, search, list, write, patch, commit, branch and reset. The fix-agent uses the write subset; the triage-agent only the read subset.",
+    "Controlled access to the local git work tree: read, search, list, write, patch, commit, and branch. The fix-agent uses the write subset; the triage-agent only the read subset.",
 });
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -281,24 +281,6 @@ mcpServer.registerTool(
   }
 );
 
-mcpServer.registerTool(
-  "reset_working_tree",
-  {
-    description:
-      "Discard all uncommitted changes: `git reset --hard HEAD` followed by `git clean -fd`. Used by fix-agent on failure and by the orchestrator as a safety net between fixes.",
-    inputSchema: {},
-  },
-  async () => {
-    try {
-      await runGit(["reset", "--hard", "HEAD"], repoRoot);
-      await runGit(["clean", "-fd"], repoRoot);
-      return textResult({ reset: true });
-    } catch (e) {
-      return errorResult(toMessage(e));
-    }
-  }
-);
-
 // ════════════════════════════════════════════════════════════════════════════
 // STATE TOOLS — read-only checks.
 // ════════════════════════════════════════════════════════════════════════════
@@ -319,24 +301,6 @@ mcpServer.registerTool(
         return textResult({ branch: null, detached: true, headCommit: hash.trim() });
       }
       return textResult({ branch: name, detached: false });
-    } catch (e) {
-      return errorResult(toMessage(e));
-    }
-  }
-);
-
-mcpServer.registerTool(
-  "is_working_tree_clean",
-  {
-    description:
-      "True iff `git status --porcelain` is empty (no staged, unstaged, or untracked changes).",
-    inputSchema: {},
-  },
-  async () => {
-    try {
-      const { stdout } = await runGit(["status", "--porcelain"], repoRoot);
-      const dirty = stdout.split(/\r?\n/).filter((l) => l.length > 0);
-      return textResult({ clean: dirty.length === 0, dirty });
     } catch (e) {
       return errorResult(toMessage(e));
     }
