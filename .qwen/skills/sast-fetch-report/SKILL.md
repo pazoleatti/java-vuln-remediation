@@ -101,19 +101,27 @@ After this skill completes successfully, the orchestrator has, in scratchpad mem
 - `report.scanObjectInfo.hash` — pinned commit; used to verify the working tree before fixes.
 - `report.taskUuid` — for the run header.
 
-Pass the **list of vulnerabilities** to `report-state-mcp.init_run` in **one call**. Build the list by joining each `resultInfo[].vulnerabilities[]` occurrence with its catalog entry from `vulnerabilitiesInfo[]` (key: `code`):
+Pass the **list of vulnerabilities** to `report-state-mcp.init_run` in **one call**, plus the `includeNotexploit` boolean from the orchestrator's `--include-notexploit` flag (default `false`). Build the list by joining each `resultInfo[].vulnerabilities[]` occurrence with its catalog entry from `vulnerabilitiesInfo[]` (key: `code`), and **forward the occurrence's `decision` field verbatim** so the MCP can apply the notexploit policy:
 
 ```jsonc
 {
-  vulnerabilityId: <vulnerabilityHash>,   // primary key — see sast-report-format
-  sastUuid:        <reportUuid>,
-  severity:        <catalog.severity>,
-  cwe:             <catalog.cwe>,         // may be null
-  title:           <catalog.description first sentence>
+  sastUuid:           <reportUuid>,
+  includeNotexploit:  <booleanFromOrchestratorFlag>,
+  vulnerabilities: [
+    {
+      vulnerabilityId: <vulnerabilityHash>,   // primary key — see sast-report-format
+      severity:        <catalog.severity>,
+      cwe:             <catalog.cwe>,         // may be null
+      title:           <catalog.description first sentence>,
+      decision:        <occurrence.decision>  // pass through; null when absent
+    }
+  ]
 }
 ```
 
 `vulnerabilityHash` (not `code`) is the per-occurrence id — use it as the state-mcp primary key. `code` is many-to-one and is only useful when reasoning about a class.
+
+**Do not pre-filter the array client-side.** Always send every occurrence; the MCP seeds findings with `decision.type == "notexploit"` as `skipped_notexploit` (when `includeNotexploit` is false) and the rest as `pending`. The response includes a `skippedNotexploit` count — record it for the final report header.
 
 ## Hard rules
 

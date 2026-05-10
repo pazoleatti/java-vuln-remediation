@@ -6,8 +6,17 @@ export const vulnerabilityStatusSchema = z.enum([
   "confirmed",
   "fixed",
   "fix_failed",
+  "skipped_notexploit",
 ]);
 export type VulnerabilityStatus = z.infer<typeof vulnerabilityStatusSchema>;
+
+export const sastDecisionSchema = z.object({
+  type: z.string().min(1),
+  comment: z.string().nullable(),
+  author: z.string().nullable(),
+  createDate: z.string().nullable(),
+});
+export type SastDecision = z.infer<typeof sastDecisionSchema>;
 
 export const vulnerabilityStateSchema = z.object({
   vulnerabilityId: z.string().min(1),
@@ -21,6 +30,7 @@ export const vulnerabilityStateSchema = z.object({
   fixSummary: z.string().nullable(),
   regressionInstructions: z.string().nullable(),
   failureReason: z.string().nullable(),
+  sastDecision: sastDecisionSchema.nullable(),
   timestamps: z.object({
     triagedAt: z.string().nullable(),
     fixedAt: z.string().nullable(),

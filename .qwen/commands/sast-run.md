@@ -7,7 +7,7 @@ description: Run the full SAST remediation pipeline for a given commit + Nexus b
 Operator invocation:
 
 ```
-/sast-run --commit=<hash> --nexus=<url> [--jira=<KEY>] [--limit=<N>]
+/sast-run --commit=<hash> --nexus=<url> [--jira=<KEY>] [--limit=<N>] [--include-notexploit]
 ```
 
 Raw argument string from the operator: `{{args}}`
@@ -25,14 +25,15 @@ You also have the following **skills** available — load and consult them at th
 
 ## Step 0 — Parse the invocation arguments
 
-From `{{args}}` extract four named flags (whitespace-separated, `--name=value` form):
+From `{{args}}` extract five named flags (whitespace-separated, `--name=value` form, plus one boolean toggle):
 
 - `--commit=<hash>` — **required.** Git commit the SAST scan should target. Bind to `commitHash`.
 - `--nexus=<url>` — **required.** Nexus distribution URL of the built artifact. Bind to `distributionUrl`.
 - `--jira=<KEY>` — optional on the command line. If absent, ask the operator for it **before** any fix delegation begins (Phase 3 entry); do **not** invent a placeholder. The JIRA key matches `^[A-Z][A-Z0-9_]+-\d+$`.
-- `--limit=<N>` — optional. Positive integer (`N >= 1`) capping how many findings get triaged this run. Bind to `triageLimit` (default: unbounded). Findings beyond the cap stay `pending` and surface in the final report's **Skipped** section.
+- `--limit=<N>` — optional. Positive integer (`N >= 1`) capping how many findings get triaged this run. Bind to `triageLimit` (default: unbounded). Findings beyond the cap stay `pending` and surface in the final report's **Skipped (--limit)** section.
+- `--include-notexploit` — optional **boolean toggle** (no `=value`; presence == true). Bind to `includeNotexploit` (default `false`). When **absent**, findings whose SAST report carries `decision.type == "notexploit"` are seeded directly as `skipped_notexploit` and never enter triage or fix; they surface in the final report's **Skipped (notexploit)** section. When **present**, the SAST `notexploit` decision is treated as historical context only and the finding goes through normal triage like the rest.
 
-If either required flag is missing or malformed, abort with a one-line message stating which flag is missing — do not attempt the run. `--limit` that is not a positive integer (`0`, negative, non-numeric) is also a malformed-flag abort — do **not** silently treat it as unbounded.
+If either required flag is missing or malformed, abort with a one-line message stating which flag is missing — do not attempt the run. `--limit` that is not a positive integer (`0`, negative, non-numeric) is also a malformed-flag abort — do **not** silently treat it as unbounded. `--include-notexploit=anything` (boolean toggle with a value) is a malformed-flag abort.
 
 Generate a short `runId` from the current timestamp (e.g. `YYYYMMDD-HHMM`). Use it for the fix-branch name (`sast-fix/<commit>-<runId>`) and the final report filename (`sast-report-<runId>.md`).
 
@@ -50,17 +51,25 @@ Apply the **`sast-fetch-report`** skill end-to-end:
 2. Poll `sast-remediation-mcp.get_report({ reportUuid })` per the skill's policy (30 s initial, linear back-off to 60 s, 20 min hard timeout, ≤ 40 attempts) until the response is report-shaped. Surface any abort condition the skill defines.
 3. Validate (`sast-report-format`): `vulnerabilitiesInfo` and `resultInfo` are arrays; `scanObjectInfo.hash` equals `--commit`; `taskUuid` present.
 4. **Zero findings short-circuit:** if no occurrences exist anywhere in `resultInfo`, skip Steps 3–5 and produce a "no findings" final report. Do **not** create the fix branch, do **not** build the index, do **not** call `init_run`.
-5. Build the `init_run` payload by joining `resultInfo[].vulnerabilities[]` against `vulnerabilitiesInfo[]` on `code`. **One** `sast-report-state-mcp.init_run` call with the **whole array**, keyed per occurrence on `vulnerabilityHash`:
+5. Build the `init_run` payload by joining `resultInfo[].vulnerabilities[]` against `vulnerabilitiesInfo[]` on `code`. **One** `sast-report-state-mcp.init_run` call with the **whole array** (never pre-filter — the MCP applies the notexploit policy itself), passing `includeNotexploit` from Step 0. Keyed per occurrence on `vulnerabilityHash`:
 
    ```jsonc
    {
-     vulnerabilityId: <vulnerabilityHash>,
-     sastUuid:        <reportUuid>,
-     severity:        <catalog.severity>,
-     cwe:             <catalog.cwe>,    // may be null
-     title:           <catalog.description first sentence>
+     sastUuid:           <reportUuid>,
+     includeNotexploit:  <booleanFromStep0>,
+     vulnerabilities: [
+       {
+         vulnerabilityId: <vulnerabilityHash>,
+         severity:        <catalog.severity>,
+         cwe:             <catalog.cwe>,                // may be null
+         title:           <catalog.description first sentence>,
+         decision:        <occurrence.decision> | null  // forward verbatim from resultInfo
+       }
+     ]
    }
    ```
+
+   Findings with `decision.type == "notexploit"` will be seeded as `skipped_notexploit` (excluded from triage/fix) when `includeNotexploit` is false, otherwise as `pending` like everything else. The `init_run` response includes `skippedNotexploit` count — record it for the Step 5 report header.
 6. `repo-mcp.create_branch({ name: "sast-fix/<commit>-<runId>" })` then `repo-mcp.checkout_branch`. If the branch already exists, abort — collision with a previous run for the same commit means state is ambiguous; the operator must clean up.
 7. `code-index.build_deep_index` — **fail-fast.** Any error here aborts the run before delegation begins.
 
@@ -98,15 +107,16 @@ Apply the **`sast-fetch-report`** skill end-to-end:
 
 1. `sast-report-state-mcp.get_run_summary({ sastUuid: reportUuid })` → structured roll-up.
 2. Render the operator-facing markdown **yourself** — this rendering step is not delegated. Required sections in this order:
-   - **Header** — `runId`, `--commit`, branch HEAD before run, fix-branch name, `reportUuid`, `taskUuid`, JIRA key, applied `--limit` (or `unbounded`), severity histogram from `vulnerabilityCounts`, totals (pending / triaged / confirmed / fixed / fix_failed / obsolete).
+   - **Header** — `runId`, `--commit`, branch HEAD before run, fix-branch name, `reportUuid`, `taskUuid`, JIRA key, applied `--limit` (or `unbounded`), `--include-notexploit` (`true`/`false`), severity histogram from `vulnerabilityCounts`, totals (pending / triaged / confirmed / fixed / fix_failed / obsolete / skipped_notexploit).
    - **Rejected** — one entry per rejected finding: `vulnerabilityHash`, location (`artifactName:location.line` + `target`), CWE, severity, and the Triage Agent's full reasoning **verbatim** — quote it, do not summarise. The reasoning is the auditable artefact.
    - **Fixed** — one entry per fixed finding: `vulnerabilityHash`, commit hash, one-line fix summary, regression-test instructions verbatim from `update_fix_result`.
    - **Fix failed** — one entry per failure: `vulnerabilityHash`, location, CWE, the `failureReason` string. This is the operator's manual to-do list.
    - **Obsolete** — one entry per finding the working tree had already closed.
    - **Skipped (--limit)** — only when `--limit` was applied and `get_run_summary.pending` is non-empty. Lead with one line stating the cap (`--limit=N, M findings deferred`). One entry per untriaged finding: `vulnerabilityHash`, severity, CWE, title. Omit the section entirely otherwise.
-   - **Anomalies** — anything that didn't fit the above (delegate exited without recording an outcome, etc.). Empty section if all clean. **Do not** put `--limit` deferrals here — they belong in **Skipped**.
+   - **Skipped (notexploit)** — only when `--include-notexploit` was **not** passed and `get_run_summary.skippedNotexploit` is non-empty. One entry per skipped finding: `vulnerabilityHash`, severity, CWE, title, plus `sastDecision.author`, `sastDecision.createDate`, and `sastDecision.comment` verbatim. Omit the section entirely otherwise.
+   - **Anomalies** — anything that didn't fit the above (delegate exited without recording an outcome, etc.). Empty section if all clean. **Do not** put `--limit` or notexploit deferrals here — they belong in their own Skipped sections.
 3. Save with `repo-mcp.write_file({ path: "sast-report-<runId>.md", content: <markdown> })`. The file is intentionally **uncommitted** — it is for the operator's review of this branch, not for the MR.
-4. Print to the operator: the fix-branch name, the report file path, and a one-line summary `N rejected, M fixed, K failed` (append `, S skipped` when `--limit` deferred any findings).
+4. Print to the operator: the fix-branch name, the report file path, and a one-line summary `N rejected, M fixed, K failed` (append `, S skipped (--limit)` when `--limit` deferred any findings; append `, T skipped (notexploit)` when notexploit findings were excluded).
 
 ## Hard rules (recap from `sast-orchestrator`)
 

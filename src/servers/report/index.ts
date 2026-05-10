@@ -41,27 +41,42 @@ const mcpServer = new McpServer({
 // ────────────────────────────────────────────────────────────────────────────
 // init_run
 // ────────────────────────────────────────────────────────────────────────────
+const sastDecisionInputSchema = z.object({
+  type: z.string().min(1).describe("Decision type from the SAST report (e.g. \"notexploit\")."),
+  comment: z.string().nullish(),
+  author: z.string().nullish(),
+  createDate: z.string().nullish(),
+});
+
 const initRunVulnSchema = z.object({
   vulnerabilityId: z.string().min(1).describe("Stable identifier of the finding from the SAST report."),
   severity: z.string().min(1).nullish(),
   cwe: z.string().min(1).nullish(),
   title: z.string().min(1).nullish(),
+  decision: sastDecisionInputSchema
+    .nullish()
+    .describe("Original decision attached to the finding in the SAST report, if any. Used to skip notexploit-marked findings unless includeNotexploit is true."),
 });
 
 mcpServer.registerTool(
   "init_run",
   {
     description:
-      "Seed pending entries in the state file from a pre-extracted vulnerability list. The orchestrator is responsible for fetching the SAST report (via sast-mcp) and extracting the array — this server is storage-only and does not parse the report. Idempotent per (sastUuid, vulnerabilityId): existing records are preserved, new findings are appended.",
+      "Seed entries in the state file from a pre-extracted vulnerability list. The orchestrator is responsible for fetching the SAST report (via sast-mcp) and extracting the array — this server is storage-only and does not parse the report. Findings carrying decision.type === \"notexploit\" are seeded with status \"skipped_notexploit\" (excluded from triage and fix) unless includeNotexploit=true, in which case they are seeded as \"pending\" like the rest. The original SAST decision is always persisted on the record for the final report. Idempotent per (sastUuid, vulnerabilityId): existing records are preserved, new findings are appended.",
     inputSchema: {
       sastUuid: z.string().min(1).describe("UUID of the SAST report this run corresponds to."),
       vulnerabilities: z
         .array(initRunVulnSchema)
         .min(1)
-        .describe("Array of vulnerabilities to seed as pending in a single call."),
+        .describe("Array of vulnerabilities to seed in a single call."),
+      includeNotexploit: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("When true, findings with decision.type === \"notexploit\" go through normal triage instead of being skipped. Default: false."),
     },
   },
-  async ({ sastUuid, vulnerabilities }) => {
+  async ({ sastUuid, vulnerabilities, includeNotexploit }) => {
     try {
       const state = await readState();
       const existingKeys = new Set(
@@ -70,21 +85,35 @@ mcpServer.registerTool(
           .map((v) => v.vulnerabilityId)
       );
       let added = 0;
+      let skippedNotexploit = 0;
       for (const v of vulnerabilities) {
         if (existingKeys.has(v.vulnerabilityId)) continue;
         existingKeys.add(v.vulnerabilityId);
+        const decision = v.decision
+          ? {
+              type: v.decision.type,
+              comment: v.decision.comment ?? null,
+              author: v.decision.author ?? null,
+              createDate: v.decision.createDate ?? null,
+            }
+          : null;
+        const isNotexploit = decision?.type === "notexploit";
+        const status: VulnerabilityStatus =
+          isNotexploit && !includeNotexploit ? "skipped_notexploit" : "pending";
+        if (status === "skipped_notexploit") skippedNotexploit += 1;
         state.vulnerabilities.push({
           vulnerabilityId: v.vulnerabilityId,
           sastUuid,
           severity: v.severity ?? null,
           cwe: v.cwe ?? null,
           title: v.title ?? null,
-          status: "pending",
+          status,
           triageReasoning: null,
           fixCommitHash: null,
           fixSummary: null,
           regressionInstructions: null,
           failureReason: null,
+          sastDecision: decision,
           timestamps: { triagedAt: null, fixedAt: null },
         });
         added += 1;
@@ -96,6 +125,8 @@ mcpServer.registerTool(
         received: vulnerabilities.length,
         added,
         alreadyPresent: vulnerabilities.length - added,
+        skippedNotexploit,
+        includeNotexploit: Boolean(includeNotexploit),
         totalForRun: state.vulnerabilities.filter((v) => v.sastUuid === sastUuid).length,
       });
     } catch (e) {
@@ -313,7 +344,7 @@ mcpServer.registerTool(
   "get_run_summary",
   {
     description:
-      "Aggregated read of a run for the final report: counts by status, list of pending findings (those not picked up for triage — e.g. due to --limit), list of fix commits with summaries + regression notes, list of rejections with reasoning, list of failed fixes with failure reasons.",
+      "Aggregated read of a run for the final report: counts by status, list of pending findings (those not picked up for triage — e.g. due to --limit), list of fix commits with summaries + regression notes, list of rejections with reasoning, list of failed fixes with failure reasons, list of findings skipped because the SAST report already marked them notexploit.",
     inputSchema: {
       sastUuid: z.string().min(1).optional().describe("If omitted, summarises the entire state file."),
     },
@@ -331,6 +362,7 @@ mcpServer.registerTool(
         confirmed: 0,
         fixed: 0,
         fix_failed: 0,
+        skipped_notexploit: 0,
       };
       for (const v of scope) counts[v.status] += 1;
 
@@ -377,6 +409,16 @@ mcpServer.registerTool(
           title: v.title,
           failureReason: v.failureReason,
         }));
+      const skippedNotexploit = scope
+        .filter((v) => v.status === "skipped_notexploit")
+        .map((v) => ({
+          vulnerabilityId: v.vulnerabilityId,
+          sastUuid: v.sastUuid,
+          severity: v.severity,
+          cwe: v.cwe,
+          title: v.title,
+          sastDecision: v.sastDecision,
+        }));
 
       return textResult({
         sastUuid: sastUuid ?? null,
@@ -386,6 +428,7 @@ mcpServer.registerTool(
         fixed,
         rejected,
         failed,
+        skippedNotexploit,
       });
     } catch (e) {
       return errorResult(e instanceof Error ? e.message : String(e));
