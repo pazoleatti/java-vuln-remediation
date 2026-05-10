@@ -40,7 +40,7 @@ Generate a short `runId` from the current timestamp (e.g. `YYYYMMDD-HHMM`). Use 
 ## Step 1 — Preflight (orchestrator Phase 0)
 
 1. Validate flags as above.
-2. `repo-mcp.get_current_branch` and `repo-mcp.get_head_commit` — record both for the final report header. (You do not check that the working tree is clean: the operator owns that responsibility, and `fix-agent` only writes after it has decided the fix is applicable.)
+2. `repo-mcp.get_current_branch` and `repo-mcp.get_head_commit` — record both for the final report header. (You do not check that the working tree is clean. Pre-existing operator-local edits are safe — `repo-mcp.commit` only stages paths each fix-agent itself wrote via `write_file` / `apply_patch` in its own invocation, never `git add -A`, so unrelated working-tree state cannot leak into a fix commit.)
 3. Sanity-check that `get_head_commit` matches `--commit` or that `--commit` is reachable as an ancestor. Mismatch is a warning, not an abort — fixes will still apply on the current tree, with `fix-agent` re-locating drifted code via `code-index`.
 
 ## Step 2 — Preparation (orchestrator Phase 1)

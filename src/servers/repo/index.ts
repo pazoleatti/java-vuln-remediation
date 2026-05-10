@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { resolve } from "node:path";
+import { relative, resolve } from "node:path";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -41,6 +41,41 @@ function errorResult(message: string) {
 function toMessage(e: unknown): string {
   if (e instanceof GitError) return e.message;
   return e instanceof Error ? e.message : String(e);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Touched-paths tracking. The fix-agent commits only files it actually
+// modified via write_file / apply_patch — never `git add -A`, which would
+// otherwise sweep up unrelated manual edits or untracked files in the work
+// tree. Entries are repo-relative POSIX paths. Cleared per path on commit.
+// ────────────────────────────────────────────────────────────────────────────
+const touchedPaths = new Set<string>();
+
+function toRepoRelPosix(root: string, p: string): string {
+  const abs = safeJoin(root, p);
+  const rel = relative(root, abs);
+  return rel.split(/[\\/]/).filter((seg) => seg.length > 0).join("/");
+}
+
+function extractPathsFromDiff(diff: string): string[] {
+  const out = new Set<string>();
+  for (const rawLine of diff.split(/\r?\n/)) {
+    // "diff --git a/<old> b/<new>" — unambiguous; covers renames (both sides).
+    const dg = rawLine.match(/^diff --git a\/(.+?) b\/(.+)$/);
+    if (dg) {
+      out.add(dg[1]);
+      out.add(dg[2]);
+      continue;
+    }
+    // Fallback for non-git diffs: --- a/<path> / +++ b/<path>. Skip /dev/null
+    // (new-file or deleted-file marker on the opposite side).
+    const m = rawLine.match(/^(?:---|\+\+\+) (?:a|b)\/(.+)$/);
+    if (m) {
+      const p = m[1].replace(/\t.*$/, "");
+      if (p !== "/dev/null") out.add(p);
+    }
+  }
+  return Array.from(out);
 }
 
 const mcpServer = new McpServer({
@@ -217,6 +252,7 @@ mcpServer.registerTool(
     try {
       const existedBefore = await pathExists(repoRoot, path);
       await writeFileText(repoRoot, path, content);
+      touchedPaths.add(toRepoRelPosix(repoRoot, path));
       return textResult({ path, bytes: Buffer.byteLength(content, "utf8"), created: !existedBefore });
     } catch (e) {
       return errorResult(toMessage(e));
@@ -235,8 +271,20 @@ mcpServer.registerTool(
   },
   async ({ diff }) => {
     try {
+      const diffPaths = extractPathsFromDiff(diff);
       await runGitWithStdin(["apply", "--whitespace=nowarn", "-"], repoRoot, diff);
-      return textResult({ applied: true });
+      const tracked: string[] = [];
+      for (const p of diffPaths) {
+        try {
+          const norm = toRepoRelPosix(repoRoot, p);
+          touchedPaths.add(norm);
+          tracked.push(norm);
+        } catch {
+          // Path failed safeJoin (escapes repo root) — git apply would have
+          // refused it too, but be defensive: ignore for tracking purposes.
+        }
+      }
+      return textResult({ applied: true, paths: tracked });
     } catch (e) {
       return errorResult(toMessage(e));
     }
@@ -247,24 +295,52 @@ mcpServer.registerTool(
   "commit",
   {
     description:
-      "Stage and commit. If `paths` is provided, only those paths are staged; otherwise all changes are staged (`git add -A`). The commit message is passed exactly as given. Returns the new commit hash and subject.",
+      "Stage and commit ONLY paths the agent modified through write_file / apply_patch in this run (tracked internally). `git add -A` is never used, so unrelated manual edits and untracked files in the work tree never end up in the commit. If `paths` is provided, it must be a subset of the agent-touched set — foreign paths are rejected. If omitted, all currently-touched paths are staged. Returns the new commit hash, subject, and the list of committed paths. Successfully-committed paths are then cleared from the touched set.",
     inputSchema: {
       message: z.string().min(1),
-      paths: z.array(z.string().min(1)).optional(),
+      paths: z
+        .array(z.string().min(1))
+        .optional()
+        .describe(
+          "Optional subset of agent-touched paths to commit. Each must have been written via write_file or apply_patch in this run."
+        ),
     },
   },
   async ({ message, paths }) => {
     try {
+      let toStage: string[];
       if (paths && paths.length > 0) {
-        for (const p of paths) safeJoin(repoRoot, p);
-        await runGit(["add", "--", ...paths], repoRoot);
+        toStage = [];
+        for (const p of paths) {
+          let norm: string;
+          try {
+            norm = toRepoRelPosix(repoRoot, p);
+          } catch (e) {
+            return errorResult(toMessage(e));
+          }
+          if (!touchedPaths.has(norm)) {
+            return errorResult(
+              `path was not modified by this agent: ${p} — only paths previously written via write_file or apply_patch can be committed`
+            );
+          }
+          toStage.push(norm);
+        }
       } else {
-        await runGit(["add", "-A"], repoRoot);
+        toStage = Array.from(touchedPaths);
       }
-      // Refuse to make an empty commit — that almost always indicates the
-      // fix-agent staged nothing and would otherwise leave a "fix" with no
-      // changes, polluting the run.
-      const { stdout: staged } = await runGit(["diff", "--cached", "--name-only"], repoRoot);
+      if (toStage.length === 0) {
+        return errorResult(
+          "no agent-touched paths to commit — call write_file or apply_patch first"
+        );
+      }
+      await runGit(["add", "--", ...toStage], repoRoot);
+      // Verify staging actually produced a diff. write_file with identical
+      // content, or apply_patch that no-ops against current state, can leave
+      // the index unchanged — refuse rather than create an empty commit.
+      const { stdout: staged } = await runGit(
+        ["diff", "--cached", "--name-only", "--", ...toStage],
+        repoRoot
+      );
       if (staged.trim().length === 0) {
         return errorResult("nothing staged — refusing to create an empty commit");
       }
@@ -274,7 +350,15 @@ mcpServer.registerTool(
         ["log", "-1", "--pretty=format:%s"],
         repoRoot
       );
-      return textResult({ commitHash: hash.trim(), subject: subject.trim() });
+      // Drop committed paths from the touched set so the next fix-agent
+      // starts clean. If a caller committed only a subset, remaining touched
+      // paths stay for a subsequent commit.
+      for (const p of toStage) touchedPaths.delete(p);
+      return textResult({
+        commitHash: hash.trim(),
+        subject: subject.trim(),
+        committedPaths: toStage,
+      });
     } catch (e) {
       return errorResult(toMessage(e));
     }
