@@ -41,7 +41,7 @@ const mcpServer = new McpServer({
 // ────────────────────────────────────────────────────────────────────────────
 // init_run
 // ────────────────────────────────────────────────────────────────────────────
-const sastDecisionInputSchema = z.object({
+const decisionInputSchema = z.object({
   type: z.string().min(1).describe("Decision type from the SAST report (e.g. \"notexploit\")."),
   comment: z.string().nullish(),
   author: z.string().nullish(),
@@ -53,7 +53,7 @@ const initRunVulnSchema = z.object({
   severity: z.string().min(1).nullish(),
   cwe: z.string().min(1).nullish(),
   title: z.string().min(1).nullish(),
-  decision: sastDecisionInputSchema
+  decision: decisionInputSchema
     .nullish()
     .describe("Original decision attached to the finding in the SAST report, if any. Used to skip notexploit-marked findings unless includeNotexploit is true."),
 });
@@ -113,7 +113,7 @@ mcpServer.registerTool(
           fixSummary: null,
           regressionInstructions: null,
           failureReason: null,
-          sastDecision: decision,
+          decision,
           timestamps: { triagedAt: null, fixedAt: null },
         });
         added += 1;
@@ -417,7 +417,7 @@ mcpServer.registerTool(
           severity: v.severity,
           cwe: v.cwe,
           title: v.title,
-          sastDecision: v.sastDecision,
+          decision: v.decision,
         }));
 
       return textResult({
