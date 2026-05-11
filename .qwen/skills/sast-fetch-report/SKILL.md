@@ -121,6 +121,8 @@ Pass the **list of vulnerabilities** to `report-state-mcp.init_run` in **one cal
 
 `vulnerabilityHash` (not `code`) is the per-occurrence id — use it as the state-mcp primary key. `code` is many-to-one and is only useful when reasoning about a class.
 
+> **Field-name trap.** The `init_run` *input* uses `decision` (mirrors the SAST report shape) and `vulnerabilityId` (the value comes from `occurrence.vulnerabilityHash`). The *state record* the MCP later returns from `list_by_status` / `get_run_summary` exposes the same payload under the name `sastDecision` — that renamed form appears only in MCP **output**, never in **input**. **Do not pass `sastDecision` into `init_run`** — Zod will silently strip it and complain that the required `decision` object is undefined. Same for `vulnerabilityHash`: pass it as the value of `vulnerabilityId`, not as a key.
+
 **Do not pre-filter the array client-side.** Always send every occurrence; the MCP seeds findings with `decision.type == "notexploit"` as `skipped_notexploit` (when `includeNotexploit` is false) and the rest as `pending`. The response includes a `skippedNotexploit` count — record it for the final report header.
 
 ## Hard rules
