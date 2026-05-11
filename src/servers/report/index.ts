@@ -54,8 +54,8 @@ const initRunVulnSchema = z.object({
   cwe: z.string().min(1).nullish(),
   title: z.string().min(1).nullish(),
   decision: decisionInputSchema
-    .nullish()
-    .describe("Original decision attached to the finding in the SAST report, if any. Used to skip notexploit-marked findings unless includeNotexploit is true."),
+    .nullable()
+    .describe("Original decision attached to the finding in the SAST report. Pass the decision object verbatim when the SAST report has one; pass explicit null otherwise. The field is required — do not omit it. Used to skip notexploit-marked findings unless includeNotexploit is true."),
 });
 
 mcpServer.registerTool(

@@ -10,7 +10,9 @@
       "Read(//c/Users/diomi/.claude/skills/**)",
       "PowerShell(npm run *)",
       "Bash(npx tsc *)",
-      "Bash(echo \"exit=$?\")"
+      "Bash(echo \"exit=$?\")",
+      "Bash(node -e ' *)",
+      "Bash(node --input-type=module -e ' *)"
     ]
   }
 }

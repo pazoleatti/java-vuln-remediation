@@ -113,7 +113,7 @@ Pass the **list of vulnerabilities** to `report-state-mcp.init_run` in **one cal
       severity:        <catalog.severity>,
       cwe:             <catalog.cwe>,         // may be null
       title:           <catalog.description first sentence>,
-      decision:        <occurrence.decision>  // pass through; null when absent
+      decision:        <occurrence.decision> ?? null  // REQUIRED — pass the object verbatim, or explicit null. Never omit the key.
     }
   ]
 }
@@ -121,7 +121,11 @@ Pass the **list of vulnerabilities** to `report-state-mcp.init_run` in **one cal
 
 `vulnerabilityHash` (not `code`) is the per-occurrence id — use it as the state-mcp primary key. `code` is many-to-one and is only useful when reasoning about a class.
 
-> **Primary-key reminder.** The per-finding key on `init_run` input is named `vulnerabilityId`; its value is `occurrence.vulnerabilityHash`. Do **not** pass it as a key called `vulnerabilityHash` — Zod will reject the call. The `decision` field uses the same name on input, state, and `get_run_summary` output.
+> **Required-fields reminder.** Two fields are non-omittable on every vulnerability item:
+> - `vulnerabilityId` — its value is `occurrence.vulnerabilityHash` (do not pass a key named `vulnerabilityHash`).
+> - `decision` — pass the SAST decision object verbatim when present, or the literal `null` when the occurrence has no decision. **Never omit the `decision` key**, even when the SAST report leaves it absent — client-side JSON Schema validation rejects the call as "expected object, received undefined" if the key is missing. Normalize absent → `null` on your side before building the payload.
+>
+> The `decision` field name is the same on input, state, and `get_run_summary` output.
 
 **Do not pre-filter the array client-side.** Always send every occurrence; the MCP seeds findings with `decision.type == "notexploit"` as `skipped_notexploit` (when `includeNotexploit` is false) and the rest as `pending`. The response includes a `skippedNotexploit` count — record it for the final report header.
 
