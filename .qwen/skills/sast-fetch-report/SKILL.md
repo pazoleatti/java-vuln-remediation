@@ -94,40 +94,42 @@ All error strings already pass through `redactErrorMessage` inside the MCP, so i
 
 ## Output contract — what this skill hands off
 
-After this skill completes successfully, the orchestrator has, in scratchpad memory:
+After this skill completes successfully, the orchestrator has:
 
 - `reportUuid` (string) — for later `get_vulnerability` calls by the Triage Agent.
-- `report` (object) — the full report JSON.
-- `report.scanObjectInfo.hash` — pinned commit; used to verify the working tree before fixes.
-- `report.taskUuid` — for the run header.
+- `report.scanObjectInfo.hash` — pinned commit, equal to `--commit`.
+- `report.taskUuid` — for the run header (this is also the `sastUuid` returned by `init_run`).
 
-Pass the **list of vulnerabilities** to `report-state-mcp.init_run` in **one call**, plus the `includeNotexploit` boolean from the orchestrator's `--include-notexploit` flag (default `false`). Build the list by joining each `resultInfo[].vulnerabilities[]` occurrence with its catalog entry from `vulnerabilitiesInfo[]` (key: `code`), and **forward the occurrence's `decision` field verbatim** so the MCP can apply the notexploit policy:
+Hand off to state-mcp with **one** call:
+
+```jsonc
+report-state-mcp.init_run({
+  commit:             <--commit>,                          // the same git commit hash
+  includeNotexploit:  <booleanFromOrchestratorFlag>,       // default false; ignored in targeted mode
+  targetVulnHash:     <vulnerabilityHash> | undefined,     // set only in targeted mode
+})
+```
+
+That is the entire payload — no array, no join, no field renaming. `init_run` reads the same cached SAST report file that `sast-remediation-mcp` wrote in step 2, performs the `vulnerabilitiesInfo` × `resultInfo[].vulnerabilities[]` join in code, normalises `decision` (absent/null/object — all three are valid in real reports), applies the notexploit policy, and seeds the state file.
+
+Response shape:
 
 ```jsonc
 {
-  sastUuid:           <reportUuid>,
-  includeNotexploit:  <booleanFromOrchestratorFlag>,
-  vulnerabilities: [
-    {
-      vulnerabilityId: <vulnerabilityHash>,   // primary key — see sast-report-format
-      severity:        <catalog.severity>,
-      cwe:             <catalog.cwe>,         // may be null
-      title:           <catalog.description first sentence>,
-      decision:        <occurrence.decision> ?? null  // REQUIRED — pass the object verbatim, or explicit null. Never omit the key.
-    }
-  ]
+  sastUuid:           <string>,         // == report.taskUuid; use this in all later state-mcp calls
+  commit:             <string>,
+  totalOccurrences:   <number>,         // per-occurrence count across all artifacts in the report
+  considered:         <number>,         // entries the MCP attempted to seed (== 1 in targeted mode, totalOccurrences otherwise)
+  added:              <number>,         // new state records
+  alreadyPresent:     <number>,         // existing records for this sastUuid that were left alone
+  skippedNotexploit:  <number>,         // entries seeded as "skipped_notexploit" — record for the final report header
+  totalForRun:        <number>,         // total state records for this sastUuid after seeding
+  targetVulnHash:     <string> | null,
+  targetFound:        <boolean> | null  // null when targetVulnHash is unset; true/false when set
 }
 ```
 
-`vulnerabilityHash` (not `code`) is the per-occurrence id — use it as the state-mcp primary key. `code` is many-to-one and is only useful when reasoning about a class.
-
-> **Required-fields reminder.** Two fields are non-omittable on every vulnerability item:
-> - `vulnerabilityId` — its value is `occurrence.vulnerabilityHash` (do not pass a key named `vulnerabilityHash`).
-> - `decision` — pass the SAST decision object verbatim when present, or the literal `null` when the occurrence has no decision. **Never omit the `decision` key**, even when the SAST report leaves it absent — client-side JSON Schema validation rejects the call as "expected object, received undefined" if the key is missing. Normalize absent → `null` on your side before building the payload.
->
-> The `decision` field name is the same on input, state, and `get_run_summary` output.
-
-**Do not pre-filter the array client-side.** Always send every occurrence; the MCP seeds findings with `decision.type == "notexploit"` as `skipped_notexploit` (when `includeNotexploit` is false) and the rest as `pending`. The response includes a `skippedNotexploit` count — record it for the final report header.
+If `targetVulnHash` is set and `targetFound: false` — abort the run before creating the branch or building the index. Nothing was seeded.
 
 ## Hard rules
 

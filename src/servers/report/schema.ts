@@ -19,7 +19,7 @@ export const decisionSchema = z.object({
 export type Decision = z.infer<typeof decisionSchema>;
 
 export const vulnerabilityStateSchema = z.object({
-  vulnerabilityId: z.string().min(1),
+  vulnerabilityHash: z.string().min(1),
   sastUuid: z.string().min(1),
   severity: z.string().nullable(),
   cwe: z.string().nullable(),

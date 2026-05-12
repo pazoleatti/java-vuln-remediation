@@ -12,7 +12,8 @@
       "Bash(npx tsc *)",
       "Bash(echo \"exit=$?\")",
       "Bash(node -e ' *)",
-      "Bash(node --input-type=module -e ' *)"
+      "Bash(node --input-type=module -e ' *)",
+      "Bash(git *)"
     ]
   }
 }

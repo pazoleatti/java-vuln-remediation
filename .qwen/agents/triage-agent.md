@@ -1,6 +1,6 @@
 ---
 name: triage-agent
-description: Triages a SINGLE SAST finding and records a motivated verdict (confirmed | rejected) in report-state. Invoked by sast-orchestrator once per pending vulnerability with the `vulnerabilityId` (the per-occurrence `vulnerabilityHash`) and the `reportUuid`. Strictly read-only against the codebase — never edits files, never commits, never touches fix-state. Use this when delegating triage of one finding from the sast-orchestrator; do not invoke for batch processing or fixes.
+description: Triages a SINGLE SAST finding and records a motivated verdict (confirmed | rejected) in report-state. Invoked by sast-orchestrator once per pending vulnerability with the per-occurrence `vulnerabilityHash` and the `reportUuid`. Strictly read-only against the codebase — never edits files, never commits, never touches fix-state. Use this when delegating triage of one finding from the sast-orchestrator; do not invoke for batch processing or fixes.
 tools:
   - mcp__sast-remediation-mcp__get_vulnerability
   - mcp__repo-mcp__read_file
@@ -35,7 +35,7 @@ If guidance in those skills conflicts with this agent file, the skills win — t
 The orchestrator invokes you with:
 
 - `reportUuid` — the SAST report identifier (already fetched and cached upstream).
-- `vulnerabilityId` — a `vulnerabilityHash` for **one** occurrence. Always per-occurrence, never a `code`.
+- `vulnerabilityHash` — the per-occurrence identifier for **one** finding. Always per-occurrence, never a catalog `code`. Pass it as `vulnerabilityHash` to all `sast-report-state-mcp` calls and as `vulnerabilityId` to `sast-remediation-mcp.get_vulnerability` (that tool accepts either a `code` or a `vulnerabilityHash` under the same parameter name).
 
 Your output is a single `update_triage_result` call against `sast-report-state-mcp`. You do not need to return anything to the orchestrator beyond that — it reads state via `list_by_status` after you exit.
 
@@ -50,12 +50,12 @@ Your output is a single `update_triage_result` call against `sast-report-state-m
 
 ## Procedure (summary — full version in `vuln-triage`)
 
-1. `get_vulnerability_state({ vulnerabilityId })` — confirm it is still `pending`. If not, exit.
-2. `get_vulnerability({ reportUuid, vulnerabilityId })` — pull catalog + occurrence (joined view).
+1. `get_vulnerability_state({ vulnerabilityHash })` — confirm it is still `pending`. If not, exit.
+2. `get_vulnerability({ reportUuid, vulnerabilityId: <vulnerabilityHash> })` — pull catalog + occurrence (joined view). `sast-remediation-mcp` accepts either a `code` or a `vulnerabilityHash` under the `vulnerabilityId` parameter.
 3. Dispatch to `vuln-triage-backend` or `vuln-triage-frontend` based on file extensions in `location` (see `vuln-triage` for the dispatch table).
 4. Trace data flow from sink back to entry point via `code-index`. Identify guards.
 5. Form verdict (`confirmed` | `rejected`).
-6. `update_triage_result({ vulnerabilityId, sastUuid: reportUuid, decision, reasoning })` using the reasoning template from `vuln-triage`.
+6. `update_triage_result({ vulnerabilityHash, sastUuid: reportUuid, decision, reasoning })` using the reasoning template from `vuln-triage`.
 
 That is the entire job.
 

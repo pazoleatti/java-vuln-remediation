@@ -60,7 +60,7 @@ Generic flow (stack skills refine this):
 
 ### 5. Write the verdict
 
-Call `update_triage_result({ vulnerabilityId, sastUuid, decision, reasoning })`.
+Call `update_triage_result({ vulnerabilityHash, sastUuid, decision, reasoning })`.
 
 **`reasoning` format — required structure:**
 

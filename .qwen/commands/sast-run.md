@@ -18,8 +18,8 @@ For the duration of this run you act as the **`sast-orchestrator`** Named Subage
 
 You also have the following **skills** available — load and consult them at the points indicated:
 
-- `sast-fetch-report` — used in Phase 1 (`request_report` → poll → `get_report`, error policy, validation, `init_run` payload shape).
-- `sast-report-format` — used whenever you read SAST report JSON: building the `init_run` payload, handing data to delegates, and rendering the final report.
+- `sast-fetch-report` — used in Phase 1 (`request_report` → poll → `get_report`, error policy, validation, `init_run` invocation).
+- `sast-report-format` — used whenever you read SAST report JSON: interpreting report fields, handing data to delegates, and rendering the final report. (You do **not** build the `init_run` payload from the report — state-mcp reads the cached report itself.)
 - `vuln-triage`, `vuln-triage-backend`, `vuln-triage-frontend` — loaded by the `triage-agent` delegates, not by you. Don't re-derive their methodology.
 - `vuln-fix`, `commit-message-format` — loaded by the `fix-agent` delegates, not by you.
 
@@ -32,7 +32,7 @@ From `{{args}}` extract six named flags (whitespace-separated, `--name=value` fo
 - `--jira=<KEY>` — optional on the command line. If absent, ask the operator for it **before** any fix delegation begins (Phase 3 entry); do **not** invent a placeholder. The JIRA key matches `^[A-Z][A-Z0-9_]+-\d+$`.
 - `--limit=<N>` — optional. Positive integer (`N >= 1`) capping how many findings get triaged this run. Bind to `triageLimit` (default: unbounded). Findings beyond the cap stay `pending` and surface in the final report's **Skipped (--limit)** section.
 - `--include-notexploit` — optional **boolean toggle** (no `=value`; presence == true). Bind to `includeNotexploit` (default `false`). When **absent**, findings whose SAST report carries `decision.type == "notexploit"` are seeded directly as `skipped_notexploit` and never enter triage or fix; they surface in the final report's **Skipped (notexploit)** section. When **present**, the SAST `notexploit` decision is treated as historical context only and the finding goes through normal triage like the rest.
-- `--vuln=<vulnerabilityHash>` — optional. Enables **targeted mode**: the run processes exactly one finding identified by its `vulnerabilityHash` from `resultInfo[].vulnerabilities[]`. Bind to `targetVulnId`. In targeted mode `--include-notexploit` is **ignored** — the target finding is always seeded as `pending` even if its SAST `decision.type == "notexploit"` (the original `decision` is still preserved verbatim on the state record under the same name, available to the triage-agent as context). All other findings of the report are skipped entirely (not seeded). `--limit` is also ignored in targeted mode (single-finding by definition).
+- `--vuln=<vulnerabilityHash>` — optional. Enables **targeted mode**: the run processes exactly one finding identified by its `vulnerabilityHash` from `resultInfo[].vulnerabilities[]`. Bind to `targetVulnHash` and forward it to `init_run` — the MCP narrows to that single occurrence and forces the notexploit policy to "include" internally, so the target is always seeded as `pending` even if its SAST `decision.type == "notexploit"` (the original `decision` is still preserved verbatim on the state record, available to the triage-agent as context). All other findings of the report are skipped entirely (not seeded). `--limit` and `--include-notexploit` are both ignored in targeted mode.
 
 If either required flag is missing or malformed, abort with a one-line message stating which flag is missing — do not attempt the run. `--limit` that is not a positive integer (`0`, negative, non-numeric) is also a malformed-flag abort — do **not** silently treat it as unbounded. `--include-notexploit=anything` (boolean toggle with a value) is a malformed-flag abort. `--vuln` with empty or whitespace-only value is a malformed-flag abort.
 
@@ -52,28 +52,9 @@ Apply the **`sast-fetch-report`** skill end-to-end:
 2. Poll `sast-remediation-mcp.get_report({ reportUuid })` per the skill's policy (30 s initial, linear back-off to 60 s, 20 min hard timeout, ≤ 40 attempts) until the response is report-shaped. Surface any abort condition the skill defines.
 3. Validate (`sast-report-format`): `vulnerabilitiesInfo` and `resultInfo` are arrays; `scanObjectInfo.hash` equals `--commit`; `taskUuid` present.
 4. **Zero findings short-circuit:** if no occurrences exist anywhere in `resultInfo`, skip Steps 3–5 and produce a "no findings" final report. Do **not** create the fix branch, do **not** build the index, do **not** call `init_run`.
-5. **Targeted-mode filter (`--vuln` only):** if `targetVulnId` is set, scan `resultInfo[].vulnerabilities[]` for an occurrence whose `vulnerabilityHash == targetVulnId`. If no match — abort with a clear "vulnerability hash not found in report" message; do **not** create the branch or build the index. If matched — narrow the array used in the next step to that single occurrence and force `includeNotexploit = true` for the `init_run` call so the target is always seeded as `pending` even if it carries a `notexploit` decision.
-6. Build the `init_run` payload by joining `resultInfo[].vulnerabilities[]` (the full array, or the single-occurrence array from Step 5 when in targeted mode) against `vulnerabilitiesInfo[]` on `code`. **One** `sast-report-state-mcp.init_run` call with the array (never pre-filter for notexploit — the MCP applies that policy itself based on the flag), passing the effective `includeNotexploit` value. Keyed per occurrence on `vulnerabilityHash`:
-
-   ```jsonc
-   {
-     sastUuid:           <reportUuid>,
-     includeNotexploit:  <effectiveIncludeNotexploit>,  // forced true in targeted mode
-     vulnerabilities: [
-       {
-         vulnerabilityId: <vulnerabilityHash>,
-         severity:        <catalog.severity>,
-         cwe:             <catalog.cwe>,                // may be null
-         title:           <catalog.description first sentence>,
-         decision:        <occurrence.decision> | null  // forward verbatim from resultInfo
-       }
-     ]
-   }
-   ```
-
-   Findings with `decision.type == "notexploit"` will be seeded as `skipped_notexploit` (excluded from triage/fix) when `includeNotexploit` is false, otherwise as `pending` like everything else. The `init_run` response includes `skippedNotexploit` count — record it for the Step 5 report header.
-7. `repo-mcp.create_branch({ name: "sast-fix/<commit>-<runId>" })` then `repo-mcp.checkout_branch`. If the branch already exists, abort — collision with a previous run for the same commit means state is ambiguous; the operator must clean up.
-8. `code-index.build_deep_index` — **fail-fast.** Any error here aborts the run before delegation begins.
+5. `sast-report-state-mcp.init_run({ commit: <commit>, includeNotexploit: <includeNotexploit>, targetVulnHash: <targetVulnHash>|undefined })` — **one** call. State-mcp reads the same per-commit cache that `get_report` populated, performs the `vulnerabilitiesInfo × resultInfo[].vulnerabilities[]` join, normalises `decision`, applies the notexploit policy, and seeds the state file. You do **not** build any payload from the report. Capture `sastUuid` (== `report.taskUuid`) and `skippedNotexploit` from the response for the Step 5 report header. If `targetVulnHash` is set and the response carries `targetFound: false`, **abort** with a clear "vulnerability hash not found in report" message before creating the branch or building the index — nothing was seeded.
+6. `repo-mcp.create_branch({ name: "sast-fix/<commit>-<runId>" })` then `repo-mcp.checkout_branch`. If the branch already exists, abort — collision with a previous run for the same commit means state is ambiguous; the operator must clean up.
+7. `code-index.build_deep_index` — **fail-fast.** Any error here aborts the run before delegation begins.
 
 ## Step 3 — Triage phase (orchestrator Phase 2)
 
@@ -84,7 +65,7 @@ Apply the **`sast-fetch-report`** skill end-to-end:
 
    ```
    reportUuid: <reportUuid>
-   vulnerabilityId: <vulnerabilityHash>
+   vulnerabilityHash: <vulnerabilityHash>
    ```
 
    The delegate runs in an isolated context, writes its verdict via `update_triage_result`, and exits. You don't read its return value — state is the source of truth.
@@ -99,10 +80,10 @@ Apply the **`sast-fetch-report`** skill end-to-end:
    - Delegate to the `fix-agent` Named Subagent with payload:
      ```
      reportUuid: <reportUuid>
-     vulnerabilityId: <vulnerabilityHash>
+     vulnerabilityHash: <vulnerabilityHash>
      jiraKey: <jiraKey>
      ```
-   - Read `sast-report-state-mcp.get_vulnerability_state({ vulnerabilityId })` to confirm the delegate moved the record to a terminal status (`fixed` / `fix_failed` / `obsolete`). If it is still `confirmed`, log the silent-failure as an anomaly and continue with the next finding. The fix-agent contract is binary — either a new commit landed or no edits were made — so you do not check or reset the working tree between delegations.
+   - Read `sast-report-state-mcp.get_vulnerability_state({ vulnerabilityHash })` to confirm the delegate moved the record to a terminal status (`fixed` / `fix_failed` / `obsolete`). If it is still `confirmed`, log the silent-failure as an anomaly and continue with the next finding. The fix-agent contract is binary — either a new commit landed or no edits were made — so you do not check or reset the working tree between delegations.
 5. Run continues through individual `fix_failed` outcomes — never abort the whole run because one fix failed. A finding that conflicts with code already changed by an earlier fix in this run is the typical `fix_failed` cause; it is recorded and reported. Only Phase 0/1 conditions abort the run.
 
 ## Step 5 — Final report (orchestrator Phase 4)

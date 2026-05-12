@@ -39,11 +39,11 @@ export async function writeState(state: StateFile): Promise<void> {
  */
 export function findVulnState(
   state: StateFile,
-  vulnerabilityId: string,
+  vulnerabilityHash: string,
   sastUuid: string | undefined
 ): { kind: "found"; record: VulnerabilityState } | { kind: "missing" } | { kind: "ambiguous"; uuids: string[] } {
   const matches = state.vulnerabilities.filter(
-    (v) => v.vulnerabilityId === vulnerabilityId && (sastUuid == null || v.sastUuid === sastUuid)
+    (v) => v.vulnerabilityHash === vulnerabilityHash && (sastUuid == null || v.sastUuid === sastUuid)
   );
   if (matches.length === 0) return { kind: "missing" };
   if (matches.length > 1) return { kind: "ambiguous", uuids: matches.map((m) => m.sastUuid) };
@@ -54,7 +54,7 @@ export function replaceVulnState(state: StateFile, updated: VulnerabilityState):
   return {
     ...state,
     vulnerabilities: state.vulnerabilities.map((v) =>
-      v.vulnerabilityId === updated.vulnerabilityId && v.sastUuid === updated.sastUuid ? updated : v
+      v.vulnerabilityHash === updated.vulnerabilityHash && v.sastUuid === updated.sastUuid ? updated : v
     ),
   };
 }

@@ -15,6 +15,8 @@ import {
   type VulnerabilityState,
   type VulnerabilityStatus,
 } from "./schema.js";
+import { readCachedReportByCommit } from "../../shared/sast-cache.js";
+import { extractInitRunSeeds } from "../../shared/sast-report.js";
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -33,100 +35,120 @@ function errorResult(message: string) {
 
 const mcpServer = new McpServer({
   name: "sast-report-state-mcp",
-  version: "0.1.0",
+  version: "0.2.0",
   description:
-    "Persistent per-vulnerability state across qwen-cli sessions. Ingests a SAST report into pending entries, then mediates strict phase transitions between Triage and Fix agents.",
+    "Persistent per-vulnerability state across qwen-cli sessions. Reads the cached SAST report directly to seed pending entries, then mediates strict phase transitions between Triage and Fix agents.",
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// init_run
+// init_run — read cached SAST report, join catalog × occurrences, seed state.
 // ────────────────────────────────────────────────────────────────────────────
-const decisionInputSchema = z.object({
-  type: z.string().min(1).describe("Decision type from the SAST report (e.g. \"notexploit\")."),
-  comment: z.string().nullish(),
-  author: z.string().nullish(),
-  createDate: z.string().nullish(),
-});
-
-const initRunVulnSchema = z.object({
-  vulnerabilityId: z.string().min(1).describe("Stable identifier of the finding from the SAST report."),
-  severity: z.string().min(1).nullish(),
-  cwe: z.string().min(1).nullish(),
-  title: z.string().min(1).nullish(),
-  decision: decisionInputSchema
-    .nullable()
-    .describe("Original decision attached to the finding in the SAST report. Pass the decision object verbatim when the SAST report has one; pass explicit null otherwise. The field is required — do not omit it. Used to skip notexploit-marked findings unless includeNotexploit is true."),
-});
-
 mcpServer.registerTool(
   "init_run",
   {
     description:
-      "Seed entries in the state file from a pre-extracted vulnerability list. The orchestrator is responsible for fetching the SAST report (via sast-mcp) and extracting the array — this server is storage-only and does not parse the report. Findings carrying decision.type === \"notexploit\" are seeded with status \"skipped_notexploit\" (excluded from triage and fix) unless includeNotexploit=true, in which case they are seeded as \"pending\" like the rest. The original SAST decision is always persisted on the record for the final report. Idempotent per (sastUuid, vulnerabilityId): existing records are preserved, new findings are appended.",
+      "Seed state-file entries for a SAST run by reading the cached corp SAST report for the given commit. The report must already be in the shared cache (request_report + get_report via sast-remediation-mcp). This server does the catalog × occurrences join and decision normalisation internally — the orchestrator does not build any array. Findings with decision.type === \"notexploit\" are seeded as \"skipped_notexploit\" (excluded from triage/fix) unless includeNotexploit=true; the original SAST decision is always persisted. When targetVulnHash is set, only the matching occurrence is seeded with includeNotexploit forced true (targeted mode); if the hash is not found the call returns targetFound:false and seeds nothing. Idempotent per (sastUuid, vulnerabilityHash).",
     inputSchema: {
-      sastUuid: z.string().min(1).describe("UUID of the SAST report this run corresponds to."),
-      vulnerabilities: z
-        .array(initRunVulnSchema)
+      commit: z
+        .string()
         .min(1)
-        .describe("Array of vulnerabilities to seed in a single call."),
+        .describe("Git commit hash whose cached SAST report to read."),
       includeNotexploit: z
         .boolean()
         .optional()
         .default(false)
-        .describe("When true, findings with decision.type === \"notexploit\" go through normal triage instead of being skipped. Default: false."),
+        .describe("When true, findings with decision.type === \"notexploit\" go through normal triage instead of being skipped. Default: false. Forced true when targetVulnHash is set."),
+      targetVulnHash: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Targeted mode: seed only this one occurrence's vulnerabilityHash. All other findings of the report are skipped. includeNotexploit is forced true."),
     },
   },
-  async ({ sastUuid, vulnerabilities, includeNotexploit }) => {
+  async ({ commit, includeNotexploit, targetVulnHash }) => {
     try {
+      const cached = await readCachedReportByCommit(commit);
+      if (cached == null) {
+        return errorResult(
+          `No cached SAST report for commit \`${commit}\`. Run sast-remediation-mcp.request_report + get_report first (or via /sast-run / /sast-list) to populate the cache.`
+        );
+      }
+
+      const extracted = extractInitRunSeeds(cached, { targetVulnHash });
+      if (!extracted.ok) {
+        return errorResult(`malformed SAST report for commit \`${commit}\`: ${extracted.error}`);
+      }
+
+      const { sastUuid, seeds, totalOccurrences, targetFound } = extracted;
+
+      if (targetVulnHash != null && !targetFound) {
+        return textResult({
+          sastUuid,
+          commit,
+          targetVulnHash,
+          targetFound: false,
+          totalOccurrences,
+          added: 0,
+          alreadyPresent: 0,
+          skippedNotexploit: 0,
+          totalForRun: 0,
+        });
+      }
+
+      const effectiveIncludeNotexploit = targetVulnHash != null ? true : Boolean(includeNotexploit);
+
       const state = await readState();
       const existingKeys = new Set(
         state.vulnerabilities
           .filter((v) => v.sastUuid === sastUuid)
-          .map((v) => v.vulnerabilityId)
+          .map((v) => v.vulnerabilityHash)
       );
+
       let added = 0;
+      let alreadyPresent = 0;
       let skippedNotexploit = 0;
-      for (const v of vulnerabilities) {
-        if (existingKeys.has(v.vulnerabilityId)) continue;
-        existingKeys.add(v.vulnerabilityId);
-        const decision = v.decision
-          ? {
-              type: v.decision.type,
-              comment: v.decision.comment ?? null,
-              author: v.decision.author ?? null,
-              createDate: v.decision.createDate ?? null,
-            }
-          : null;
-        const isNotexploit = decision?.type === "notexploit";
+
+      for (const seed of seeds) {
+        if (existingKeys.has(seed.vulnerabilityHash)) {
+          alreadyPresent += 1;
+          continue;
+        }
+        existingKeys.add(seed.vulnerabilityHash);
+        const isNotexploit = seed.decision?.type === "notexploit";
         const status: VulnerabilityStatus =
-          isNotexploit && !includeNotexploit ? "skipped_notexploit" : "pending";
+          isNotexploit && !effectiveIncludeNotexploit ? "skipped_notexploit" : "pending";
         if (status === "skipped_notexploit") skippedNotexploit += 1;
         state.vulnerabilities.push({
-          vulnerabilityId: v.vulnerabilityId,
+          vulnerabilityHash: seed.vulnerabilityHash,
           sastUuid,
-          severity: v.severity ?? null,
-          cwe: v.cwe ?? null,
-          title: v.title ?? null,
+          severity: seed.severity,
+          cwe: seed.cwe,
+          title: seed.title,
           status,
           triageReasoning: null,
           fixCommitHash: null,
           fixSummary: null,
           regressionInstructions: null,
           failureReason: null,
-          decision,
+          decision: seed.decision,
           timestamps: { triagedAt: null, fixedAt: null },
         });
         added += 1;
       }
       await writeState(state);
+
       return textResult({
         sastUuid,
+        commit,
         statePath: statePathForDisplay(),
-        received: vulnerabilities.length,
+        targetVulnHash: targetVulnHash ?? null,
+        targetFound: targetVulnHash != null ? true : null,
+        includeNotexploit: effectiveIncludeNotexploit,
+        totalOccurrences,
+        considered: seeds.length,
         added,
-        alreadyPresent: vulnerabilities.length - added,
+        alreadyPresent,
         skippedNotexploit,
-        includeNotexploit: Boolean(includeNotexploit),
         totalForRun: state.vulnerabilities.filter((v) => v.sastUuid === sastUuid).length,
       });
     } catch (e) {
@@ -143,26 +165,26 @@ mcpServer.registerTool(
   {
     description: "Return the full state record for a single vulnerability.",
     inputSchema: {
-      vulnerabilityId: z.string().min(1),
+      vulnerabilityHash: z.string().min(1),
       sastUuid: z
         .string()
         .min(1)
         .optional()
-        .describe("Required only if the same vulnerabilityId exists across multiple SAST runs."),
+        .describe("Required only if the same vulnerabilityHash exists across multiple SAST runs."),
     },
   },
-  async ({ vulnerabilityId, sastUuid }) => {
+  async ({ vulnerabilityHash, sastUuid }) => {
     try {
       const state = await readState();
-      const result = findVulnState(state, vulnerabilityId, sastUuid);
+      const result = findVulnState(state, vulnerabilityHash, sastUuid);
       if (result.kind === "missing") {
         return errorResult(
-          `No state record for vulnerabilityId=${vulnerabilityId}${sastUuid ? ` sastUuid=${sastUuid}` : ""}.`
+          `No state record for vulnerabilityHash=${vulnerabilityHash}${sastUuid ? ` sastUuid=${sastUuid}` : ""}.`
         );
       }
       if (result.kind === "ambiguous") {
         return errorResult(
-          `vulnerabilityId=${vulnerabilityId} exists in multiple runs (${result.uuids.join(", ")}). Pass sastUuid to disambiguate.`
+          `vulnerabilityHash=${vulnerabilityHash} exists in multiple runs (${result.uuids.join(", ")}). Pass sastUuid to disambiguate.`
         );
       }
       return textResult(result.record);
@@ -179,7 +201,7 @@ mcpServer.registerTool(
   "list_by_status",
   {
     description:
-      "List vulnerability records filtered by status, optionally narrowed to a single SAST run. Returns light projections (id, sastUuid, severity, cwe, title, status) to keep agent context small.",
+      "List vulnerability records filtered by status, optionally narrowed to a single SAST run. Returns light projections (vulnerabilityHash, sastUuid, severity, cwe, title, status) to keep agent context small.",
     inputSchema: {
       status: vulnerabilityStatusSchema,
       sastUuid: z.string().min(1).optional(),
@@ -191,7 +213,7 @@ mcpServer.registerTool(
       const items = state.vulnerabilities
         .filter((v) => v.status === status && (sastUuid == null || v.sastUuid === sastUuid))
         .map((v) => ({
-          vulnerabilityId: v.vulnerabilityId,
+          vulnerabilityHash: v.vulnerabilityHash,
           sastUuid: v.sastUuid,
           severity: v.severity,
           cwe: v.cwe,
@@ -214,7 +236,7 @@ mcpServer.registerTool(
     description:
       "Triage Agent only. Records the triage verdict for a pending vulnerability. Allowed transitions: pending → confirmed | rejected. Refuses any other source status — Triage cannot overwrite a fix outcome.",
     inputSchema: {
-      vulnerabilityId: z.string().min(1),
+      vulnerabilityHash: z.string().min(1),
       sastUuid: z.string().min(1).optional(),
       decision: z.enum(["confirmed", "rejected"]),
       reasoning: z
@@ -223,16 +245,16 @@ mcpServer.registerTool(
         .describe("Motivated explanation for the verdict. For rejections this becomes the audit trail of why it was deemed a false positive."),
     },
   },
-  async ({ vulnerabilityId, sastUuid, decision, reasoning }) => {
+  async ({ vulnerabilityHash, sastUuid, decision, reasoning }) => {
     try {
       const state = await readState();
-      const result = findVulnState(state, vulnerabilityId, sastUuid);
+      const result = findVulnState(state, vulnerabilityHash, sastUuid);
       if (result.kind === "missing") {
-        return errorResult(`No state record for vulnerabilityId=${vulnerabilityId}.`);
+        return errorResult(`No state record for vulnerabilityHash=${vulnerabilityHash}.`);
       }
       if (result.kind === "ambiguous") {
         return errorResult(
-          `Ambiguous vulnerabilityId=${vulnerabilityId} (runs: ${result.uuids.join(", ")}). Pass sastUuid.`
+          `Ambiguous vulnerabilityHash=${vulnerabilityHash} (runs: ${result.uuids.join(", ")}). Pass sastUuid.`
         );
       }
       const current = result.record;
@@ -265,7 +287,7 @@ mcpServer.registerTool(
     description:
       "Fix Agent only. Records the outcome of a fix attempt. Allowed source statuses: confirmed, fix_failed (retry). Refuses pending/rejected/fixed — Fix cannot triage and cannot overwrite a successful fix. For outcome=fixed, commitHash + fixSummary + regressionInstructions are required. For outcome=fix_failed, failureReason is required.",
     inputSchema: {
-      vulnerabilityId: z.string().min(1),
+      vulnerabilityHash: z.string().min(1),
       sastUuid: z.string().min(1).optional(),
       outcome: z.enum(["fixed", "fix_failed"]),
       commitHash: z.string().min(1).optional(),
@@ -275,7 +297,7 @@ mcpServer.registerTool(
     },
   },
   async ({
-    vulnerabilityId,
+    vulnerabilityHash,
     sastUuid,
     outcome,
     commitHash,
@@ -285,13 +307,13 @@ mcpServer.registerTool(
   }) => {
     try {
       const state = await readState();
-      const result = findVulnState(state, vulnerabilityId, sastUuid);
+      const result = findVulnState(state, vulnerabilityHash, sastUuid);
       if (result.kind === "missing") {
-        return errorResult(`No state record for vulnerabilityId=${vulnerabilityId}.`);
+        return errorResult(`No state record for vulnerabilityHash=${vulnerabilityHash}.`);
       }
       if (result.kind === "ambiguous") {
         return errorResult(
-          `Ambiguous vulnerabilityId=${vulnerabilityId} (runs: ${result.uuids.join(", ")}). Pass sastUuid.`
+          `Ambiguous vulnerabilityHash=${vulnerabilityHash} (runs: ${result.uuids.join(", ")}). Pass sastUuid.`
         );
       }
       const current = result.record;
@@ -369,7 +391,7 @@ mcpServer.registerTool(
       const pending = scope
         .filter((v) => v.status === "pending")
         .map((v) => ({
-          vulnerabilityId: v.vulnerabilityId,
+          vulnerabilityHash: v.vulnerabilityHash,
           sastUuid: v.sastUuid,
           severity: v.severity,
           cwe: v.cwe,
@@ -378,7 +400,7 @@ mcpServer.registerTool(
       const fixed = scope
         .filter((v) => v.status === "fixed")
         .map((v) => ({
-          vulnerabilityId: v.vulnerabilityId,
+          vulnerabilityHash: v.vulnerabilityHash,
           sastUuid: v.sastUuid,
           severity: v.severity,
           cwe: v.cwe,
@@ -391,7 +413,7 @@ mcpServer.registerTool(
       const rejected = scope
         .filter((v) => v.status === "rejected")
         .map((v) => ({
-          vulnerabilityId: v.vulnerabilityId,
+          vulnerabilityHash: v.vulnerabilityHash,
           sastUuid: v.sastUuid,
           severity: v.severity,
           cwe: v.cwe,
@@ -402,7 +424,7 @@ mcpServer.registerTool(
       const failed = scope
         .filter((v) => v.status === "fix_failed")
         .map((v) => ({
-          vulnerabilityId: v.vulnerabilityId,
+          vulnerabilityHash: v.vulnerabilityHash,
           sastUuid: v.sastUuid,
           severity: v.severity,
           cwe: v.cwe,
@@ -412,7 +434,7 @@ mcpServer.registerTool(
       const skippedNotexploit = scope
         .filter((v) => v.status === "skipped_notexploit")
         .map((v) => ({
-          vulnerabilityId: v.vulnerabilityId,
+          vulnerabilityHash: v.vulnerabilityHash,
           sastUuid: v.sastUuid,
           severity: v.severity,
           cwe: v.cwe,

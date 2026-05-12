@@ -47,8 +47,8 @@ Load `sast-report-format` before processing any finding — it is the single sou
 2. `get_symbol_body` for `location.target`. Diff the current body against `location.text`:
    - **Match** → proceed to plan the fix.
    - **Drift, vulnerable code still present** → plan the fix at the new location.
-   - **Drift, vulnerable code already gone** (including: a previous fix in this run already closed it) → record `update_fix_result({ vulnerabilityId, status: "obsolete", reasoning })` citing the symbol and what changed; do not commit, do not write anything.
-   - **Drift, vulnerable shape still present but local context has changed enough that the fix you would have applied no longer fits** → record `update_fix_result({ vulnerabilityId, status: "fix_failed", failureReason: "conflict_with_prior_fix" })` (or another specific reason). Do not improvise a new patch on top of a moving target.
+   - **Drift, vulnerable code already gone** (including: a previous fix in this run already closed it) → record `update_fix_result({ vulnerabilityHash, status: "obsolete", reasoning })` citing the symbol and what changed; do not commit, do not write anything.
+   - **Drift, vulnerable shape still present but local context has changed enough that the fix you would have applied no longer fits** → record `update_fix_result({ vulnerabilityHash, status: "fix_failed", failureReason: "conflict_with_prior_fix" })` (or another specific reason). Do not improvise a new patch on top of a moving target.
 3. Walk to the entry point one more time via symbol references. The Triage Agent already did this — your job is to confirm the fix you are about to apply actually closes the path they identified, not some other site of the same pattern.
 
 ### 4. Apply the fix — CWE pattern catalog
@@ -140,11 +140,11 @@ Rules:
 Exactly one `update_fix_result` call per invocation. Pick the matching shape:
 
 - **Fixed:**
-  `update_fix_result({ vulnerabilityId, status: "fixed", fixCommitHash, fixSummary, regressionInstructions })`
+  `update_fix_result({ vulnerabilityHash, status: "fixed", fixCommitHash, fixSummary, regressionInstructions })`
 - **Obsolete (vulnerable code already gone):**
-  `update_fix_result({ vulnerabilityId, status: "obsolete", reasoning })`
+  `update_fix_result({ vulnerabilityHash, status: "obsolete", reasoning })`
 - **Fix failed (planned fix unworkable, no edits made):**
-  `update_fix_result({ vulnerabilityId, status: "fix_failed", failureReason: "<short, specific>" })`
+  `update_fix_result({ vulnerabilityHash, status: "fix_failed", failureReason: "<short, specific>" })`
 
 There is no `blocked` status — `fix_failed` covers "I couldn't safely fix this", with the reason narrating *why*. Examples of good `failureReason` values: `conflict_with_prior_fix`, `pattern_not_applicable`, `no_narrow_fix_identified`, `dependency_unavailable`, `requires_design_decision: <one-line>`. "could not fix" is not enough.
 
